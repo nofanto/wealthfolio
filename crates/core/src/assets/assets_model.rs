@@ -433,6 +433,9 @@ impl Asset {
         } else if self.is_option() {
             // Option without metadata — default to standard 100 multiplier
             Decimal::from(100)
+        } else if self.is_bond() {
+            // Fixed-income prices are conventionally quoted as a percentage of par.
+            Decimal::new(1, 2)
         } else {
             Decimal::ONE
         }

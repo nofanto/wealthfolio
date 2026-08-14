@@ -1,8 +1,8 @@
 use crate::activities::{
-    Activity, ACTIVITY_SUBTYPE_BONUS, ACTIVITY_TYPE_BUY, ACTIVITY_TYPE_CREDIT,
+    is_cash_symbol, Activity, ACTIVITY_SUBTYPE_BONUS, ACTIVITY_TYPE_BUY, ACTIVITY_TYPE_CREDIT,
     ACTIVITY_TYPE_DEPOSIT, ACTIVITY_TYPE_DIVIDEND, ACTIVITY_TYPE_FEE, ACTIVITY_TYPE_INTEREST,
-    ACTIVITY_TYPE_SELL, ACTIVITY_TYPE_TAX, ACTIVITY_TYPE_TRANSFER_IN, ACTIVITY_TYPE_TRANSFER_OUT,
-    ACTIVITY_TYPE_WITHDRAWAL,
+    ACTIVITY_TYPE_SELL, ACTIVITY_TYPE_SPLIT, ACTIVITY_TYPE_TAX, ACTIVITY_TYPE_TRANSFER_IN,
+    ACTIVITY_TYPE_TRANSFER_OUT, ACTIVITY_TYPE_WITHDRAWAL,
 };
 use crate::fx::currency::{normalize_amount, normalize_currency_code};
 use crate::portfolio::valuation::ExternalFlowSource;
@@ -127,7 +127,141 @@ impl EconomicEventEffect {
 
 pub struct ActivityEconomicsResolver;
 
+/// Flat inputs used to resolve the cash economics of persisted, imported, and
+/// not-yet-persisted activities. Monetary values are magnitudes; the activity
+/// type is the sole source of direction.
+#[derive(Clone, Copy, Debug)]
+pub struct ActivityCashInputs<'a> {
+    pub activity_type: &'a str,
+    pub is_security_transfer: bool,
+    pub quantity: Option<Decimal>,
+    pub unit_price: Option<Decimal>,
+    pub amount: Option<Decimal>,
+    pub fee: Option<Decimal>,
+    pub tax: Option<Decimal>,
+    pub unit_multiplier: Decimal,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct ResolvedActivityCash {
+    /// Authoritative final cash magnitude, including fees and taxes.
+    pub amount: Option<Decimal>,
+    /// Cash magnitude derived from quantity, price, multiplier, and charges.
+    pub expected_amount: Option<Decimal>,
+    /// Signed cash movement. Positive is an inflow; negative is an outflow.
+    pub signed_cash_effect: Decimal,
+    /// Pre-charge economics used for lots, cost basis, and realized P/L.
+    pub gross_amount: Option<Decimal>,
+    pub amount_was_derived: bool,
+}
+
 impl ActivityEconomicsResolver {
+    pub fn resolve_cash(activity: &Activity, unit_multiplier: Decimal) -> ResolvedActivityCash {
+        Self::resolve_cash_inputs(ActivityCashInputs {
+            activity_type: activity.effective_type(),
+            is_security_transfer: Self::is_security_transfer(activity),
+            quantity: activity.quantity,
+            unit_price: activity.unit_price,
+            amount: activity.amount,
+            fee: activity.fee,
+            tax: activity.tax,
+            unit_multiplier,
+        })
+    }
+
+    pub fn resolve_cash_inputs(inputs: ActivityCashInputs<'_>) -> ResolvedActivityCash {
+        if inputs.activity_type == ACTIVITY_TYPE_SPLIT || inputs.is_security_transfer {
+            return ResolvedActivityCash::default();
+        }
+
+        let fee = inputs.fee.unwrap_or(Decimal::ZERO).abs();
+        let tax = inputs.tax.unwrap_or(Decimal::ZERO).abs();
+        let charges = fee + tax;
+        let expected_amount = Self::derived_cash_amount(inputs, fee, tax);
+        let supplied_amount = inputs.amount.map(|amount| amount.abs());
+        let amount = supplied_amount.or(expected_amount);
+        let amount_was_derived = supplied_amount.is_none() && amount.is_some();
+
+        let signed_cash_effect = amount
+            .map(|amount| match inputs.activity_type {
+                ACTIVITY_TYPE_SELL
+                | ACTIVITY_TYPE_DEPOSIT
+                | ACTIVITY_TYPE_DIVIDEND
+                | ACTIVITY_TYPE_INTEREST
+                | ACTIVITY_TYPE_CREDIT
+                | ACTIVITY_TYPE_TRANSFER_IN => amount,
+                ACTIVITY_TYPE_BUY
+                | ACTIVITY_TYPE_WITHDRAWAL
+                | ACTIVITY_TYPE_FEE
+                | ACTIVITY_TYPE_TAX
+                | ACTIVITY_TYPE_TRANSFER_OUT => -amount,
+                _ => Decimal::ZERO,
+            })
+            .unwrap_or(Decimal::ZERO);
+
+        let gross_amount = amount.and_then(|amount| {
+            let gross = match inputs.activity_type {
+                ACTIVITY_TYPE_BUY => amount - charges,
+                ACTIVITY_TYPE_SELL
+                | ACTIVITY_TYPE_DEPOSIT
+                | ACTIVITY_TYPE_DIVIDEND
+                | ACTIVITY_TYPE_INTEREST
+                | ACTIVITY_TYPE_CREDIT
+                | ACTIVITY_TYPE_TRANSFER_IN => amount + charges,
+                ACTIVITY_TYPE_WITHDRAWAL | ACTIVITY_TYPE_TRANSFER_OUT => amount - charges,
+                ACTIVITY_TYPE_FEE | ACTIVITY_TYPE_TAX => amount,
+                _ => return None,
+            };
+            (gross > Decimal::ZERO).then_some(gross)
+        });
+
+        ResolvedActivityCash {
+            amount,
+            expected_amount,
+            signed_cash_effect,
+            gross_amount,
+            amount_was_derived,
+        }
+    }
+
+    fn derived_cash_amount(
+        inputs: ActivityCashInputs<'_>,
+        fee: Decimal,
+        tax: Decimal,
+    ) -> Option<Decimal> {
+        let charges = fee + tax;
+        let multiplier = Self::valid_unit_multiplier(inputs.unit_multiplier);
+        let derived_gross = match (inputs.quantity, inputs.unit_price) {
+            (Some(quantity), Some(unit_price)) => {
+                let gross = quantity.abs() * unit_price.abs() * multiplier;
+                (gross > Decimal::ZERO).then_some(gross)
+            }
+            _ => None,
+        };
+
+        let derived = match inputs.activity_type {
+            ACTIVITY_TYPE_BUY => derived_gross.map(|gross| gross + charges),
+            ACTIVITY_TYPE_SELL
+            | ACTIVITY_TYPE_DEPOSIT
+            | ACTIVITY_TYPE_DIVIDEND
+            | ACTIVITY_TYPE_INTEREST
+            | ACTIVITY_TYPE_CREDIT
+            | ACTIVITY_TYPE_TRANSFER_IN => derived_gross.map(|gross| gross - charges),
+            ACTIVITY_TYPE_WITHDRAWAL | ACTIVITY_TYPE_TRANSFER_OUT => {
+                derived_gross.map(|gross| gross + charges)
+            }
+            ACTIVITY_TYPE_FEE => (fee > Decimal::ZERO).then_some(fee),
+            // Historical standalone TAX rows sometimes stored the charge in
+            // `fee`. Keep that legacy fallback aligned with Activity::charge_amt_for.
+            ACTIVITY_TYPE_TAX => (tax > Decimal::ZERO)
+                .then_some(tax)
+                .or_else(|| (fee > Decimal::ZERO).then_some(fee)),
+            _ => None,
+        }?;
+
+        (derived > Decimal::ZERO).then_some(derived)
+    }
+
     pub fn compile_activity(
         activity: &Activity,
         quote: Option<&Quote>,
@@ -338,10 +472,10 @@ impl ActivityEconomicsResolver {
         matches!(
             activity.effective_type(),
             ACTIVITY_TYPE_TRANSFER_IN | ACTIVITY_TYPE_TRANSFER_OUT
-        ) && activity
-            .asset_id
-            .as_deref()
-            .is_some_and(|asset_id| !asset_id.trim().is_empty())
+        ) && activity.asset_id.as_deref().is_some_and(|asset_id| {
+            let asset_id = asset_id.trim();
+            !asset_id.is_empty() && !is_cash_symbol(asset_id)
+        })
     }
 
     pub fn lot_cost_basis_value(activity: &Activity) -> Decimal {
@@ -437,11 +571,9 @@ impl ActivityEconomicsResolver {
     }
 
     fn cash_or_legacy_flow_amount(activity: &Activity) -> Decimal {
-        activity
+        Self::resolve_cash(activity, Decimal::ONE)
             .amount
-            .or_else(|| Some(activity.quantity? * activity.unit_price?))
             .unwrap_or(Decimal::ZERO)
-            .abs()
     }
 
     fn valid_unit_multiplier(unit_multiplier: Decimal) -> Decimal {
@@ -450,5 +582,111 @@ impl ActivityEconomicsResolver {
         } else {
             Decimal::ONE
         }
+    }
+}
+
+#[cfg(test)]
+mod cash_tests {
+    use super::*;
+    use rust_decimal_macros::dec;
+
+    fn inputs(activity_type: &'static str) -> ActivityCashInputs<'static> {
+        ActivityCashInputs {
+            activity_type,
+            is_security_transfer: false,
+            quantity: Some(dec!(2)),
+            unit_price: Some(dec!(10)),
+            amount: None,
+            fee: Some(dec!(1)),
+            tax: Some(dec!(2)),
+            unit_multiplier: Decimal::ONE,
+        }
+    }
+
+    #[test]
+    fn supplied_trade_amount_is_authoritative_and_type_controls_direction() {
+        let mut buy = inputs(ACTIVITY_TYPE_BUY);
+        buy.amount = Some(dec!(-12));
+        let buy = ActivityEconomicsResolver::resolve_cash_inputs(buy);
+        assert_eq!(buy.amount, Some(dec!(12)));
+        assert_eq!(buy.expected_amount, Some(dec!(23)));
+        assert_eq!(buy.signed_cash_effect, dec!(-12));
+        assert_eq!(buy.gross_amount, Some(dec!(9)));
+        assert!(!buy.amount_was_derived);
+
+        let mut sell = inputs(ACTIVITY_TYPE_SELL);
+        sell.amount = Some(dec!(-12));
+        let sell = ActivityEconomicsResolver::resolve_cash_inputs(sell);
+        assert_eq!(sell.signed_cash_effect, dec!(12));
+        assert_eq!(sell.gross_amount, Some(dec!(15)));
+    }
+
+    #[test]
+    fn missing_trade_amount_is_derived_with_multiplier_and_charges() {
+        let mut buy = inputs(ACTIVITY_TYPE_BUY);
+        buy.unit_multiplier = dec!(100);
+        let buy = ActivityEconomicsResolver::resolve_cash_inputs(buy);
+        assert_eq!(buy.amount, Some(dec!(2003)));
+        assert_eq!(buy.signed_cash_effect, dec!(-2003));
+        assert_eq!(buy.gross_amount, Some(dec!(2000)));
+        assert!(buy.amount_was_derived);
+
+        let sell = ActivityEconomicsResolver::resolve_cash_inputs(inputs(ACTIVITY_TYPE_SELL));
+        assert_eq!(sell.amount, Some(dec!(17)));
+        assert_eq!(sell.signed_cash_effect, dec!(17));
+        assert_eq!(sell.gross_amount, Some(dec!(20)));
+    }
+
+    #[test]
+    fn standalone_charges_and_security_transfers_follow_cash_contract() {
+        let mut fee = inputs(ACTIVITY_TYPE_FEE);
+        fee.amount = None;
+        assert_eq!(
+            ActivityEconomicsResolver::resolve_cash_inputs(fee).signed_cash_effect,
+            dec!(-1)
+        );
+
+        let mut tax = inputs(ACTIVITY_TYPE_TAX);
+        tax.amount = None;
+        assert_eq!(
+            ActivityEconomicsResolver::resolve_cash_inputs(tax).signed_cash_effect,
+            dec!(-2)
+        );
+
+        let mut legacy_tax = inputs(ACTIVITY_TYPE_TAX);
+        legacy_tax.amount = None;
+        legacy_tax.tax = None;
+        assert_eq!(
+            ActivityEconomicsResolver::resolve_cash_inputs(legacy_tax).signed_cash_effect,
+            dec!(-1)
+        );
+
+        let mut transfer = inputs(ACTIVITY_TYPE_TRANSFER_IN);
+        transfer.amount = Some(dec!(25));
+        transfer.is_security_transfer = true;
+        assert_eq!(
+            ActivityEconomicsResolver::resolve_cash_inputs(transfer),
+            ResolvedActivityCash::default()
+        );
+    }
+
+    #[test]
+    fn reported_fractional_drip_buy_trusts_cash_amount_and_preserves_trade_details() {
+        let resolved = ActivityEconomicsResolver::resolve_cash_inputs(ActivityCashInputs {
+            activity_type: ACTIVITY_TYPE_BUY,
+            is_security_transfer: false,
+            quantity: Some(dec!(0.001)),
+            unit_price: Some(dec!(589.8108)),
+            amount: Some(dec!(-0.30)),
+            fee: None,
+            tax: None,
+            unit_multiplier: Decimal::ONE,
+        });
+
+        assert_eq!(resolved.amount, Some(dec!(0.30)));
+        assert_eq!(resolved.signed_cash_effect, dec!(-0.30));
+        assert_eq!(resolved.expected_amount, Some(dec!(0.5898108)));
+        assert_eq!(resolved.gross_amount, Some(dec!(0.30)));
+        assert!(!resolved.amount_was_derived);
     }
 }

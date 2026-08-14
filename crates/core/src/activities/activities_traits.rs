@@ -223,6 +223,18 @@ pub trait ActivityRepositoryTrait: Send + Sync {
         delete_ids: Vec<String>,
     ) -> Result<ActivityBulkMutationResult>;
     async fn create_activities(&self, activities: Vec<NewActivity>) -> Result<usize>;
+    /// Returns every activity that may need cash-amount normalization, including
+    /// rows belonging to archived accounts.
+    fn get_activities_for_cash_amount_migration(&self) -> Result<Vec<Activity>> {
+        self.get_activities()
+    }
+    async fn update_activity_amounts_for_migration(
+        &self,
+        updates: Vec<ActivityAmountUpdate>,
+    ) -> Result<usize> {
+        let _ = updates;
+        Ok(0)
+    }
     fn get_first_activity_date(
         &self,
         account_ids: Option<&[String]>,
@@ -464,6 +476,10 @@ pub trait ActivityServiceTrait: Send + Sync {
         &self,
         activities: Vec<super::ActivityUpsert>,
     ) -> Result<super::BulkUpsertResult>;
+
+    /// Canonicalizes existing cash magnitudes and derives missing amounts.
+    /// Safe to call more than once; only changed rows are persisted.
+    async fn migrate_activity_cash_amounts(&self) -> Result<usize>;
 
     /// Prepares activities for normal save/create flows.
     /// Uses only payload metadata (no live symbol/provider resolution).

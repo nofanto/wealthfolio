@@ -186,6 +186,15 @@ pub fn build_activity_metadata(activity: &AccountUniversalActivity) -> Option<St
         );
     }
 
+    // Keep the provider's signed value for audit/debugging even though the
+    // canonical activity amount is stored as an unsigned magnitude.
+    if let Some(source_amount) = activity.amount {
+        metadata.insert(
+            "source_amount".to_string(),
+            serde_json::json!(source_amount),
+        );
+    }
+
     if let Some(ref institution) = activity.institution {
         metadata.insert("institution".to_string(), serde_json::json!(institution));
     }
@@ -284,32 +293,6 @@ fn is_broker_bond(code: Option<&str>) -> bool {
         code.map(|c| c.to_uppercase()).as_deref(),
         Some("BOND" | "FIXEDINCOME" | "FIXED_INCOME" | "FIXED INCOME" | "DEBT")
     )
-}
-
-fn normalized_trade_amount(
-    activity_type: &str,
-    quantity: Option<Decimal>,
-    unit_price: Option<Decimal>,
-    amount: Option<Decimal>,
-    is_option_activity: bool,
-    is_crypto: bool,
-    is_bond: bool,
-) -> Option<Decimal> {
-    if matches!(
-        activity_type,
-        activities::ACTIVITY_TYPE_BUY | activities::ACTIVITY_TYPE_SELL
-    ) && !is_option_activity
-        && !is_crypto
-        && !is_bond
-    {
-        if let (Some(quantity), Some(unit_price)) = (quantity, unit_price) {
-            if !quantity.is_zero() && !unit_price.is_zero() {
-                return Some(quantity * unit_price);
-            }
-        }
-    }
-
-    amount
 }
 
 /// Maps a broker API activity into a `NewActivity` with unresolved `AssetResolutionInput`.
@@ -516,20 +499,12 @@ pub fn map_broker_activity(
         .clone()
         .or(activity.settlement_date.clone())
         .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
+    let settlement_date = activity.settlement_date.clone();
 
     let quantity = activity.units.and_then(Decimal::from_f64).map(|d| d.abs());
     let unit_price = activity.price.and_then(Decimal::from_f64).map(|d| d.abs());
     let fee = activity.fee.and_then(Decimal::from_f64).map(|d| d.abs());
     let amount = activity.amount.and_then(Decimal::from_f64).map(|d| d.abs());
-    let amount = normalized_trade_amount(
-        &activity_type,
-        quantity,
-        unit_price,
-        amount,
-        is_option_activity,
-        is_crypto,
-        is_bond,
-    );
     let fx_rate = activity.fx_rate.and_then(Decimal::from_f64);
 
     // Normalize minor currency units (e.g., GBp -> GBP) and convert amounts
@@ -564,6 +539,7 @@ pub fn map_broker_activity(
         activity_type,
         subtype,
         activity_date,
+        settlement_date,
         quantity,
         unit_price,
         currency: currency_code,
@@ -722,23 +698,27 @@ mod tests {
     }
 
     #[test]
-    fn test_map_broker_activity_trade_amount_policy_recomputes_plain_trade_amount() {
+    fn test_map_broker_activity_trade_amount_policy_preserves_supplied_amount() {
         let activity = AccountUniversalActivity {
             id: Some("act-equity-buy".to_string()),
             activity_type: Some("BUY".to_string()),
             symbol: Some(broker_symbol("AMD", "cs")),
             units: Some(10.0),
             price: Some(99.76),
-            amount: Some(9976.0),
+            amount: Some(-9976.0),
             fee: Some(4.9),
             ..Default::default()
         };
 
         let mapped = map_test_activity(&activity);
 
-        assert_eq!(mapped.amount.unwrap().round_dp(4), decimal("997.6000"));
+        assert_eq!(mapped.amount.unwrap().round_dp(4), decimal("9976.0000"));
         assert_eq!(mapped.fee.unwrap().round_dp(4), decimal("4.9000"));
         assert_eq!(mapped.tax, None);
+
+        let metadata: serde_json::Value =
+            serde_json::from_str(mapped.metadata.as_deref().unwrap()).unwrap();
+        assert_eq!(metadata["source_amount"], -9976.0);
     }
 
     #[test]

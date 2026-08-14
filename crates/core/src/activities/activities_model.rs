@@ -268,6 +268,10 @@ impl Activity {
 
     /// Get the charge amount for standalone charge handling.
     pub(crate) fn charge_amt_for(&self, activity_type: &ActivityType) -> Decimal {
+        if self.amount.is_some() {
+            return self.amt();
+        }
+
         if matches!(activity_type, ActivityType::Tax) && !self.tax_amt().is_zero() {
             return self.tax_amt();
         }
@@ -330,6 +334,8 @@ pub struct NewActivity {
     pub activity_type: String,
     pub subtype: Option<String>, // Semantic variation (DRIP, STAKING_REWARD, etc.)
     pub activity_date: String,
+    #[serde(default)]
+    pub settlement_date: Option<String>,
     #[serde(
         default,
         deserialize_with = "decimal_input_format::deserialize_option_decimal"
@@ -520,6 +526,9 @@ impl NewActivity {
         }
 
         validate_activity_date(&self.activity_date)?;
+        if let Some(settlement_date) = self.settlement_date.as_deref() {
+            validate_activity_date(settlement_date)?;
+        }
 
         Self::validate_asset_backed_income_values(
             &self.activity_type,
@@ -600,6 +609,8 @@ pub struct ActivityUpdate {
     )]
     pub subtype: Option<String>, // Semantic variation (DRIP, STAKING_REWARD, etc.)
     pub activity_date: String,
+    #[serde(default)]
+    pub settlement_date: Option<String>,
     #[serde(
         default,
         deserialize_with = "decimal_input_format::deserialize_patch_decimal"
@@ -659,6 +670,9 @@ impl ActivityUpdate {
             .into());
         }
         validate_activity_date(&self.activity_date)?;
+        if let Some(settlement_date) = self.settlement_date.as_deref() {
+            validate_activity_date(settlement_date)?;
+        }
         Ok(())
     }
 
@@ -734,6 +748,18 @@ pub struct ActivityBulkMutationResult {
     pub created_mappings: Vec<ActivityBulkIdentifierMapping>,
     #[serde(default)]
     pub errors: Vec<ActivityBulkMutationError>,
+}
+
+/// Minimal persistence patch used by the one-time cash amount migration.
+/// This intentionally bypasses normal activity mutation semantics so the
+/// backfill does not mark rows as user-edited or enqueue sync overlays.
+#[derive(Debug, Clone)]
+pub struct ActivityAmountUpdate {
+    pub id: String,
+    pub amount: Decimal,
+    /// Recomputed only for Wealthfolio-generated semantic hashes. `None` keeps
+    /// provider/manual idempotency keys untouched.
+    pub idempotency_key: Option<String>,
 }
 
 /// Pair-aware request for creating or updating an internal cash transfer.
@@ -846,6 +872,9 @@ pub struct ActivityDetails {
     pub exchange_mic: Option<String>,
     pub asset_pricing_mode: String, // MARKET, MANUAL, DERIVED, NONE
     pub instrument_type: Option<String>,
+    /// Canonical multiplier resolved from the linked asset (for example 100 for
+    /// standard options, 10 for mini options, and 0.01 for bonds).
+    pub contract_multiplier: String,
     // Sync/source metadata
     pub source_system: Option<String>,
     pub source_record_id: Option<String>,
@@ -1802,6 +1831,8 @@ pub struct ActivityUpsert {
     pub activity_type: String,
     pub subtype: Option<String>,
     pub activity_date: String,
+    #[serde(default)]
+    pub settlement_date: Option<String>,
     pub quantity: Option<Decimal>,
     pub unit_price: Option<Decimal>,
     pub currency: String,
@@ -1915,6 +1946,7 @@ impl From<ActivityImport> for NewActivity {
             activity_type: import.activity_type,
             subtype: import.subtype,
             activity_date: import.date,
+            settlement_date: None,
             quantity: import.quantity,
             unit_price: import.unit_price,
             currency: import.currency,

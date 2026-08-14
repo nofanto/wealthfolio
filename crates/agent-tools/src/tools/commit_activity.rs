@@ -149,6 +149,7 @@ fn draft_to_new_activity(draft: &ActivityDraft) -> Result<NewActivity, AgentTool
         activity_type: draft.activity_type.clone(),
         subtype: draft.subtype.clone(),
         activity_date: draft.activity_date.clone(),
+        settlement_date: None,
         quantity: to_decimal(draft.quantity, "quantity")?,
         unit_price: to_decimal(draft.unit_price, "unitPrice")?,
         currency: draft.currency.clone(),

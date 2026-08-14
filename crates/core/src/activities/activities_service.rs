@@ -7,14 +7,15 @@ use std::sync::{Arc, RwLock};
 use crate::accounts::{account_types, Account, AccountServiceTrait};
 use crate::activities::activities_constants::{
     classify_import_activity, is_cash_symbol, is_garbage_symbol, requires_symbol,
-    ImportSymbolDisposition, ACTIVITY_TYPE_CREDIT, ACTIVITY_TYPE_FEE, ACTIVITY_TYPE_INTEREST,
-    ACTIVITY_TYPE_SPLIT, ACTIVITY_TYPE_TRANSFER_IN, ACTIVITY_TYPE_TRANSFER_OUT,
+    ImportSymbolDisposition, ACTIVITY_TYPE_BUY, ACTIVITY_TYPE_CREDIT, ACTIVITY_TYPE_DEPOSIT,
+    ACTIVITY_TYPE_DIVIDEND, ACTIVITY_TYPE_FEE, ACTIVITY_TYPE_INTEREST, ACTIVITY_TYPE_SELL,
+    ACTIVITY_TYPE_SPLIT, ACTIVITY_TYPE_TAX, ACTIVITY_TYPE_TRANSFER_IN, ACTIVITY_TYPE_TRANSFER_OUT,
     ACTIVITY_TYPE_WITHDRAWAL, PRICE_BEARING_ACTIVITY_TYPES,
 };
 use crate::activities::activities_errors::ActivityError;
 use crate::activities::activities_model::*;
 use crate::activities::csv_parser::{self, ParseConfig, ParsedCsvResult};
-use crate::activities::idempotency::compute_idempotency_key;
+use crate::activities::idempotency::{compute_activity_idempotency_key, compute_idempotency_key};
 use crate::activities::{
     ActivityRepositoryTrait, ActivityServiceTrait, TransferPair, TransferPairResolution,
 };
@@ -29,8 +30,11 @@ use crate::assets::{
 };
 use crate::errors::{DatabaseError, Error};
 use crate::events::{DomainEvent, DomainEventSink, NoOpDomainEventSink};
-use crate::fx::currency::{get_normalization_rule, normalize_amount, resolve_currency};
+use crate::fx::currency::{
+    currency_rounding_tolerance, get_normalization_rule, normalize_amount, resolve_currency,
+};
 use crate::fx::FxServiceTrait;
+use crate::portfolio::economic_events::{ActivityCashInputs, ActivityEconomicsResolver};
 use crate::quotes::constants::DATA_SOURCE_MANUAL;
 use crate::quotes::{Quote, QuoteServiceTrait};
 use crate::utils::time_utils::parse_user_timezone_or_default;
@@ -182,61 +186,190 @@ impl ActivityService {
             amount,
         )?;
 
-        if self.should_clear_stale_price_bearing_amount(activity, existing) {
-            activity.amount = Some(None);
+        Ok(())
+    }
+
+    fn cash_unit_multiplier(
+        &self,
+        asset_id: Option<&str>,
+        activity_override: Option<Decimal>,
+    ) -> Decimal {
+        if let Some(multiplier) = activity_override.filter(|value| *value > Decimal::ZERO) {
+            return multiplier;
+        }
+        asset_id
+            .and_then(|asset_id| self.asset_service.get_asset_by_id(asset_id).ok())
+            .map(|asset| asset.contract_multiplier())
+            .unwrap_or(Decimal::ONE)
+    }
+
+    fn migration_cash_unit_multiplier(&self, activity: &Activity) -> Option<Decimal> {
+        let requires_asset_multiplier = matches!(
+            activity.effective_type(),
+            ACTIVITY_TYPE_BUY
+                | ACTIVITY_TYPE_SELL
+                | ACTIVITY_TYPE_DIVIDEND
+                | ACTIVITY_TYPE_INTEREST
+        ) && activity.quantity.is_some()
+            && activity.unit_price.is_some();
+        if !requires_asset_multiplier {
+            return Some(Decimal::ONE);
+        }
+
+        if let Some(multiplier) = activity
+            .metadata
+            .as_ref()
+            .and_then(Self::contract_multiplier_from_metadata)
+        {
+            return Some(multiplier);
+        }
+        let asset_id = activity.asset_id.as_deref()?;
+        self.asset_service
+            .get_asset_by_id(asset_id)
+            .ok()
+            .map(|asset| asset.contract_multiplier())
+    }
+
+    fn import_cash_unit_multiplier(&self, activity: &ActivityImport) -> Decimal {
+        if activity.asset_id.is_some() {
+            return self.cash_unit_multiplier(activity.asset_id.as_deref(), None);
+        }
+        match activity
+            .instrument_type
+            .as_deref()
+            .map(str::trim)
+            .map(str::to_uppercase)
+            .as_deref()
+        {
+            Some("OPTION") => Decimal::from(100),
+            Some("BOND") => Decimal::new(1, 2),
+            _ => Decimal::ONE,
+        }
+    }
+
+    fn resolve_new_activity_amount(
+        &self,
+        activity: &mut NewActivity,
+        resolved_asset_id: Option<&str>,
+    ) {
+        if activity.amount.is_some() || activity.activity_type == ACTIVITY_TYPE_SPLIT {
+            return;
+        }
+
+        activity.amount = ActivityEconomicsResolver::resolve_cash_inputs(ActivityCashInputs {
+            activity_type: &activity.activity_type,
+            is_security_transfer: is_securities_transfer(
+                &activity.activity_type,
+                resolved_asset_id,
+            ),
+            quantity: activity.quantity,
+            unit_price: activity.unit_price,
+            amount: None,
+            fee: activity.fee,
+            tax: activity.tax,
+            unit_multiplier: self.cash_unit_multiplier(
+                resolved_asset_id,
+                Self::custom_option_multiplier(activity.metadata.as_deref()),
+            ),
+        })
+        .amount;
+    }
+
+    fn validate_cash_amount_contract(
+        activity_type: &str,
+        amount: Option<Decimal>,
+        fee: Option<Decimal>,
+        tax: Option<Decimal>,
+        is_security_transfer: bool,
+    ) -> Result<()> {
+        let is_cash_impacting = matches!(
+            activity_type,
+            ACTIVITY_TYPE_BUY
+                | ACTIVITY_TYPE_SELL
+                | ACTIVITY_TYPE_DEPOSIT
+                | ACTIVITY_TYPE_WITHDRAWAL
+                | ACTIVITY_TYPE_DIVIDEND
+                | ACTIVITY_TYPE_INTEREST
+                | ACTIVITY_TYPE_CREDIT
+                | ACTIVITY_TYPE_FEE
+                | ACTIVITY_TYPE_TAX
+                | ACTIVITY_TYPE_TRANSFER_IN
+                | ACTIVITY_TYPE_TRANSFER_OUT
+        );
+        if !is_cash_impacting || is_security_transfer {
+            return Ok(());
+        }
+
+        let amount = amount
+            .filter(|value| *value > Decimal::ZERO)
+            .ok_or_else(|| {
+                ActivityError::InvalidData(format!(
+                    "{} activities require a positive final cash amount",
+                    activity_type
+                ))
+            })?;
+        if matches!(
+            activity_type,
+            ACTIVITY_TYPE_BUY | ACTIVITY_TYPE_WITHDRAWAL | ACTIVITY_TYPE_TRANSFER_OUT
+        ) {
+            let charges = fee.unwrap_or(Decimal::ZERO).abs() + tax.unwrap_or(Decimal::ZERO).abs();
+            if amount <= charges {
+                return Err(ActivityError::InvalidData(format!(
+                    "{} final cash amount must be greater than its included fees and taxes",
+                    activity_type
+                ))
+                .into());
+            }
         }
 
         Ok(())
     }
 
-    fn should_clear_stale_price_bearing_amount(
+    fn resolve_update_activity_amount(
         &self,
-        activity: &ActivityUpdate,
+        activity: &mut ActivityUpdate,
         existing: &Activity,
-    ) -> bool {
-        if activity.amount.is_some() {
-            return false;
+        resolved_asset_id: Option<&str>,
+    ) {
+        if activity.activity_type == ACTIVITY_TYPE_SPLIT {
+            return;
         }
 
-        let asset_id = activity.get_symbol_id().or(existing.asset_id.as_deref());
-        let derives_amount_from_quantity_price = PRICE_BEARING_ACTIVITY_TYPES
-            .contains(&activity.activity_type.as_str())
-            || is_securities_transfer(&activity.activity_type, asset_id);
-        if !derives_amount_from_quantity_price {
-            return false;
-        }
-        if self.is_bond_asset(asset_id) {
-            return false;
+        let explicitly_supplied = matches!(activity.amount, Some(Some(_)));
+        let existing_amount_is_trusted = activity.amount.is_none() && existing.amount.is_some();
+        if explicitly_supplied || existing_amount_is_trusted {
+            return;
         }
 
-        let effective_quantity = activity.quantity.unwrap_or(existing.quantity);
-        let effective_unit_price = activity.unit_price.unwrap_or(existing.unit_price);
-        if effective_quantity.is_none_or(|quantity| quantity.is_zero())
-            || effective_unit_price.is_none_or(|unit_price| unit_price.is_zero())
-        {
-            return false;
-        }
-
-        activity.account_id != existing.account_id
-            || !activity.currency.eq_ignore_ascii_case(&existing.currency)
-            || Self::decimal_patch_changes(activity.quantity, existing.quantity)
-            || Self::decimal_patch_changes(activity.unit_price, existing.unit_price)
-            || Self::decimal_patch_changes(activity.fee, existing.fee)
-            || Self::decimal_patch_changes(activity.tax, existing.tax)
-            || Self::decimal_patch_changes(activity.fx_rate, existing.fx_rate)
-    }
-
-    fn is_bond_asset(&self, asset_id: Option<&str>) -> bool {
-        asset_id
-            .and_then(|asset_id| self.asset_service.get_asset_by_id(asset_id).ok())
-            .is_some_and(|asset| asset.instrument_type == Some(InstrumentType::Bond))
-    }
-
-    fn decimal_patch_changes(patch: Option<Option<Decimal>>, existing: Option<Decimal>) -> bool {
-        match patch {
-            None => false,
-            Some(value) => value.map(|d| d.abs()) != existing.map(|d| d.abs()),
-        }
+        let amount = ActivityEconomicsResolver::resolve_cash_inputs(ActivityCashInputs {
+            activity_type: &activity.activity_type,
+            is_security_transfer: is_securities_transfer(
+                &activity.activity_type,
+                resolved_asset_id,
+            ),
+            quantity: activity.quantity.unwrap_or(existing.quantity),
+            unit_price: activity.unit_price.unwrap_or(existing.unit_price),
+            amount: None,
+            fee: activity.fee.unwrap_or(existing.fee),
+            tax: activity.tax.unwrap_or(existing.tax),
+            unit_multiplier: self.cash_unit_multiplier(
+                resolved_asset_id,
+                activity
+                    .metadata
+                    .as_deref()
+                    .and_then(|metadata| serde_json::from_str(metadata).ok())
+                    .as_ref()
+                    .and_then(Self::contract_multiplier_from_metadata)
+                    .or_else(|| {
+                        existing
+                            .metadata
+                            .as_ref()
+                            .and_then(Self::contract_multiplier_from_metadata)
+                    }),
+            ),
+        })
+        .amount;
+        activity.amount = Some(amount);
     }
 
     fn validate_new_activity_income_values(activity: &NewActivity) -> Result<()> {
@@ -261,20 +394,6 @@ impl ActivityService {
     }
 
     fn downgrade_unresolvable_sync_asset_income(activity: &mut NewActivity) {
-        let should_derive_amount = activity.amount.is_none_or(|amount| amount.is_zero())
-            && activity
-                .quantity
-                .is_some_and(|quantity| quantity.is_sign_positive() && !quantity.is_zero())
-            && activity
-                .unit_price
-                .is_some_and(|unit_price| unit_price.is_sign_positive() && !unit_price.is_zero());
-
-        if should_derive_amount {
-            if let (Some(quantity), Some(unit_price)) = (activity.quantity, activity.unit_price) {
-                activity.amount = Some(quantity * unit_price);
-            }
-        }
-
         activity.subtype = None;
     }
 
@@ -1119,6 +1238,7 @@ impl ActivityService {
                 activity_type: ACTIVITY_TYPE_TRANSFER_OUT.to_string(),
                 subtype: None,
                 activity_date: request.activity_date.clone(),
+                settlement_date: None,
                 quantity: None,
                 unit_price: None,
                 currency: values.source_currency.clone(),
@@ -1143,6 +1263,7 @@ impl ActivityService {
                 activity_type: ACTIVITY_TYPE_TRANSFER_IN.to_string(),
                 subtype: None,
                 activity_date: request.activity_date.clone(),
+                settlement_date: None,
                 quantity: None,
                 unit_price: None,
                 currency: values.destination_currency.clone(),
@@ -1178,6 +1299,7 @@ impl ActivityService {
                 activity_type: ACTIVITY_TYPE_TRANSFER_OUT.to_string(),
                 subtype: None,
                 activity_date: request.activity_date.clone(),
+                settlement_date: None,
                 quantity: Some(None),
                 unit_price: Some(None),
                 currency: values.source_currency.clone(),
@@ -1196,6 +1318,7 @@ impl ActivityService {
                 activity_type: ACTIVITY_TYPE_TRANSFER_IN.to_string(),
                 subtype: None,
                 activity_date: request.activity_date.clone(),
+                settlement_date: None,
                 quantity: Some(None),
                 unit_price: Some(None),
                 currency: values.destination_currency.clone(),
@@ -1231,6 +1354,7 @@ impl ActivityService {
             activity_type: counterpart.activity_type.clone(),
             subtype: None,
             activity_date: update.activity_date.clone(),
+            settlement_date: update.settlement_date.clone(),
             quantity: None,
             unit_price: None,
             currency: counterpart.currency.clone(),
@@ -1308,6 +1432,7 @@ impl ActivityService {
     }
 
     fn build_import_idempotency_key(
+        &self,
         activity: &ActivityImport,
         default_account_id: &str,
     ) -> Option<String> {
@@ -1330,7 +1455,7 @@ impl ActivityService {
         // Normalize to absolute values and major currencies, matching what
         // prepare_activities_internal does before the apply-step key computation.
         let quantity = activity.quantity.map(|v| v.abs());
-        let (unit_price, amount, fee, currency) =
+        let (unit_price, supplied_amount, fee, tax, currency) =
             if let Some(rule) = get_normalization_rule(activity.currency.as_str()) {
                 let unit_price = activity
                     .unit_price
@@ -1341,7 +1466,10 @@ impl ActivityService {
                 let fee = activity
                     .fee
                     .map(|v| normalize_amount(v.abs(), activity.currency.as_str()).0);
-                (unit_price, amount, fee, rule.major_code)
+                let tax = activity
+                    .tax
+                    .map(|v| normalize_amount(v.abs(), activity.currency.as_str()).0);
+                (unit_price, amount, fee, tax, rule.major_code)
             } else {
                 let ccy = if activity.currency.trim().is_empty() {
                     "USD"
@@ -1352,9 +1480,24 @@ impl ActivityService {
                     activity.unit_price.map(|v| v.abs()),
                     activity.amount.map(|v| v.abs()),
                     activity.fee.map(|v| v.abs()),
+                    activity.tax.map(|v| v.abs()),
                     ccy,
                 )
             };
+        let amount = ActivityEconomicsResolver::resolve_cash_inputs(ActivityCashInputs {
+            activity_type: &activity.activity_type,
+            is_security_transfer: is_securities_transfer(
+                &activity.activity_type,
+                activity.asset_id.as_deref(),
+            ),
+            quantity,
+            unit_price,
+            amount: supplied_amount,
+            fee,
+            tax,
+            unit_multiplier: self.import_cash_unit_multiplier(activity),
+        })
+        .amount;
 
         Some(compute_idempotency_key(
             account_id,
@@ -1616,13 +1759,21 @@ impl ActivityService {
     /// JSON metadata key for a non-standard option contract multiplier (e.g. mini options = 10).
     const METADATA_CONTRACT_MULTIPLIER: &'static str = "contract_multiplier";
 
+    fn contract_multiplier_from_metadata(metadata: &serde_json::Value) -> Option<Decimal> {
+        let value = metadata.get(Self::METADATA_CONTRACT_MULTIPLIER)?;
+        value
+            .as_f64()
+            .and_then(Decimal::from_f64_retain)
+            .or_else(|| value.as_str().and_then(|raw| raw.parse::<Decimal>().ok()))
+            .filter(|multiplier| *multiplier > Decimal::ZERO)
+    }
+
     /// Extracts a custom contract multiplier from the activity metadata JSON, if present.
     fn custom_option_multiplier(activity_metadata: Option<&str>) -> Option<Decimal> {
         activity_metadata
             .and_then(|m| serde_json::from_str::<serde_json::Value>(m).ok())
-            .and_then(|v| v.get(Self::METADATA_CONTRACT_MULTIPLIER)?.as_f64())
-            .and_then(Decimal::from_f64_retain)
-            .filter(|d| d.is_sign_positive() && !d.is_zero())
+            .as_ref()
+            .and_then(Self::contract_multiplier_from_metadata)
     }
 
     /// Infers the asset kind and instrument type from symbol, exchange, and input values.
@@ -2340,6 +2491,15 @@ impl ActivityService {
             activity.currency = normalized_currency;
         }
 
+        self.resolve_new_activity_amount(&mut activity, resolved_asset_id.as_deref());
+        Self::validate_cash_amount_contract(
+            &activity.activity_type,
+            activity.amount,
+            activity.fee,
+            activity.tax,
+            is_securities_transfer(&activity.activity_type, resolved_asset_id.as_deref()),
+        )?;
+
         // Preserve explicit idempotency key when provided (e.g., intentional manual duplicates).
         // Otherwise compute a stable content-based key for deduplication.
         let explicit_idempotency_key = activity
@@ -2390,6 +2550,7 @@ impl ActivityService {
         &self,
         mut activity: ActivityUpdate,
     ) -> Result<ActivityUpdate> {
+        let existing = self.activity_repository.get_activity(&activity.id)?;
         activity.activity_date =
             self.validate_and_normalize_activity_date(&activity.activity_date)?;
         let account: Account = self.account_service.get_account(&activity.account_id)?;
@@ -2779,6 +2940,15 @@ impl ActivityService {
             activity.currency = normalized_currency;
         }
 
+        self.resolve_update_activity_amount(&mut activity, &existing, resolved_asset_id.as_deref());
+        Self::validate_cash_amount_contract(
+            &activity.activity_type,
+            activity.amount.unwrap_or(existing.amount),
+            activity.fee.unwrap_or(existing.fee),
+            activity.tax.unwrap_or(existing.tax),
+            is_securities_transfer(&activity.activity_type, resolved_asset_id.as_deref()),
+        )?;
+
         Ok(activity)
     }
 
@@ -3154,6 +3324,53 @@ impl ActivityService {
             };
             (field.to_string(), message)
         })
+    }
+
+    fn add_import_cash_mismatch_warning(&self, activity: &mut ActivityImport) {
+        if !matches!(
+            activity.activity_type.as_str(),
+            ACTIVITY_TYPE_BUY | ACTIVITY_TYPE_SELL
+        ) && !NewActivity::is_asset_backed_income_subtype(
+            &activity.activity_type,
+            activity.subtype.as_deref(),
+        ) {
+            return;
+        }
+
+        let Some(trusted_amount) = activity.amount.map(|amount| amount.abs()) else {
+            return;
+        };
+        let multiplier = self.import_cash_unit_multiplier(activity);
+        let resolved = ActivityEconomicsResolver::resolve_cash_inputs(ActivityCashInputs {
+            activity_type: &activity.activity_type,
+            is_security_transfer: false,
+            quantity: activity.quantity,
+            unit_price: activity.unit_price,
+            amount: activity.amount,
+            fee: activity.fee,
+            tax: activity.tax,
+            unit_multiplier: multiplier,
+        });
+        let Some(expected_amount) = resolved.expected_amount else {
+            return;
+        };
+        let difference = trusted_amount - expected_amount;
+        if difference.abs() <= currency_rounding_tolerance(&activity.currency) {
+            return;
+        }
+
+        Self::add_activity_warning(
+            activity,
+            "amount",
+            &format!(
+                "Wealthfolio will use the trusted cash amount {} {}. The quantity × price total with fees and taxes is {} {} (difference {}).",
+                trusted_amount,
+                activity.currency,
+                expected_amount,
+                activity.currency,
+                difference
+            ),
+        );
     }
 
     async fn check_activities_import_for_account(
@@ -3577,6 +3794,7 @@ impl ActivityService {
 
             activity.is_valid = true;
             self.validate_currency(&mut activity, &account_currency);
+            self.add_import_cash_mismatch_warning(&mut activity);
             activities_with_status.push(activity);
         }
 
@@ -3595,7 +3813,7 @@ impl ActivityService {
                 continue;
             }
 
-            let Some(key) = Self::build_import_idempotency_key(activity, &account_id) else {
+            let Some(key) = self.build_import_idempotency_key(activity, &account_id) else {
                 keys.push(None);
                 continue;
             };
@@ -3702,6 +3920,96 @@ impl ActivityServiceTrait for ActivityService {
     /// Retrieves all activities
     fn get_activities(&self) -> Result<Vec<Activity>> {
         self.activity_repository.get_activities()
+    }
+
+    async fn migrate_activity_cash_amounts(&self) -> Result<usize> {
+        let activities = self
+            .activity_repository
+            .get_activities_for_cash_amount_migration()?;
+        let existing_key_owner: HashMap<String, String> = activities
+            .iter()
+            .filter_map(|activity| {
+                activity
+                    .idempotency_key
+                    .as_ref()
+                    .map(|key| (key.clone(), activity.id.clone()))
+            })
+            .collect();
+        let mut claimed_recomputed_keys = HashSet::new();
+        let mut updates = Vec::new();
+        let mut changed_activities = Vec::new();
+
+        for activity in activities {
+            if activity.effective_type() == ACTIVITY_TYPE_SPLIT
+                || ActivityEconomicsResolver::is_security_transfer(&activity)
+            {
+                continue;
+            }
+
+            let migrated_amount = if let Some(amount) = activity.amount {
+                let magnitude = amount.abs();
+                (magnitude != amount).then_some(magnitude)
+            } else {
+                self.migration_cash_unit_multiplier(&activity)
+                    .and_then(|multiplier| {
+                        ActivityEconomicsResolver::resolve_cash(&activity, multiplier).amount
+                    })
+                    .filter(|amount| *amount > Decimal::ZERO)
+            };
+
+            if let Some(amount) = migrated_amount {
+                let idempotency_key = activity.idempotency_key.as_ref().and_then(|key| {
+                    if key != &compute_activity_idempotency_key(&activity) {
+                        return None;
+                    }
+                    let candidate = {
+                        let mut migrated = activity.clone();
+                        migrated.amount = Some(amount);
+                        compute_activity_idempotency_key(&migrated)
+                    };
+                    let owned_by_other = existing_key_owner
+                        .get(&candidate)
+                        .is_some_and(|owner| owner != &activity.id);
+                    if owned_by_other || !claimed_recomputed_keys.insert(candidate.clone()) {
+                        None
+                    } else {
+                        Some(candidate)
+                    }
+                });
+                updates.push(ActivityAmountUpdate {
+                    id: activity.id.clone(),
+                    amount,
+                    idempotency_key,
+                });
+                changed_activities.push(activity);
+            }
+        }
+
+        let changed = self
+            .activity_repository
+            .update_activity_amounts_for_migration(updates)
+            .await?;
+        if changed > 0 {
+            let mut account_ids = HashSet::new();
+            let mut asset_ids = HashSet::new();
+            let mut currencies = HashSet::new();
+            for activity in &changed_activities {
+                Self::add_activity_to_event_sets(
+                    activity,
+                    &mut account_ids,
+                    &mut asset_ids,
+                    &mut currencies,
+                );
+            }
+            self.emit_activities_changed(
+                account_ids.into_iter().collect(),
+                asset_ids.into_iter().collect(),
+                currencies.into_iter().collect(),
+                Self::earliest_activity_at_utc(&changed_activities),
+            );
+        }
+
+        Ok(changed)
     }
 
     /// Retrieves activities by account ID
@@ -3925,6 +4233,7 @@ impl ActivityServiceTrait for ActivityService {
                     activity_type: counterpart.activity_type.clone(),
                     subtype: None,
                     activity_date: updated.activity_date.to_rfc3339(),
+                    settlement_date: updated.settlement_date.map(|date| date.to_rfc3339()),
                     quantity: None,
                     unit_price: None,
                     currency: updated.currency.clone(),
@@ -5001,7 +5310,7 @@ impl ActivityServiceTrait for ActivityService {
                 new_act.subtype.as_deref(),
             );
             Self::normalize_new_activity_economic_signs(new_act);
-            new_act.idempotency_key = Self::build_import_idempotency_key(src, &new_act.account_id);
+            new_act.idempotency_key = self.build_import_idempotency_key(src, &new_act.account_id);
         }
 
         // ── 5. Partition hard duplicates before insert ───────────────────────
@@ -5979,6 +6288,27 @@ impl ActivityService {
                 if activity.fee.is_none() && activity.tax.is_none() {
                     let (_, normalized_currency) = normalize_amount(Decimal::ZERO, &input_currency);
                     activity.currency = normalized_currency.to_string();
+                }
+            }
+
+            self.resolve_new_activity_amount(&mut activity, resolved_asset_id.as_deref());
+
+            if let Err(error) = Self::validate_cash_amount_contract(
+                &activity.activity_type,
+                activity.amount,
+                activity.fee,
+                activity.tax,
+                is_securities_transfer(&activity.activity_type, resolved_asset_id.as_deref()),
+            ) {
+                if mode.is_sync() {
+                    warn!(
+                        "Broker sync activity at index {} has invalid cash data and will be imported for review: {}",
+                        idx, error
+                    );
+                    activity.needs_review = Some(true);
+                    activity.status = Some(ActivityStatus::Draft);
+                } else {
+                    return Err(error);
                 }
             }
 

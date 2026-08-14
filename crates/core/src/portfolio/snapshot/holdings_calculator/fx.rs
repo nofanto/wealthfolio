@@ -88,6 +88,45 @@ impl HoldingsCalculator {
         }
     }
 
+    /// Converts an already-account-denominated amount to the portfolio base
+    /// currency. Call this after `convert_to_account_currency` so an activity's
+    /// explicit activity→account rate remains authoritative.
+    pub(super) fn convert_account_amount_to_base_currency(
+        &self,
+        amount: Decimal,
+        account_currency: &str,
+        activity: &Activity,
+        context: &str,
+    ) -> Decimal {
+        let base_currency = self.base_currency.read().unwrap().clone();
+        if account_currency == base_currency {
+            return amount;
+        }
+
+        let activity_date = self.activity_local_date(activity);
+        match self.fx_service.convert_currency_for_date(
+            amount,
+            account_currency,
+            &base_currency,
+            activity_date,
+        ) {
+            Ok(converted) => converted,
+            Err(error) => {
+                warn!(
+                    "Holdings Calc ({} {}): Failed account-to-base conversion {} {}->{} on {}: {}. Base contribution not updated.",
+                    context,
+                    activity.id,
+                    amount,
+                    account_currency,
+                    base_currency,
+                    activity_date,
+                    error
+                );
+                Decimal::ZERO
+            }
+        }
+    }
+
     /// Determines the cached asset facts needed to create and value a position.
     pub(super) fn get_position_info(&self, asset_id: &str) -> Result<AssetPositionInfo> {
         debug!("Getting position info for asset_id: {}", asset_id);

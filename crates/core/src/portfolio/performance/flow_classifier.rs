@@ -4,7 +4,7 @@
 //! Only external flows (money crossing the portfolio boundary) affect TWR.
 
 use crate::activities::{
-    Activity, ACTIVITY_SUBTYPE_BONUS, ACTIVITY_TYPE_CREDIT, ACTIVITY_TYPE_DEPOSIT,
+    is_cash_symbol, Activity, ACTIVITY_SUBTYPE_BONUS, ACTIVITY_TYPE_CREDIT, ACTIVITY_TYPE_DEPOSIT,
     ACTIVITY_TYPE_TRANSFER_IN, ACTIVITY_TYPE_TRANSFER_OUT, ACTIVITY_TYPE_WITHDRAWAL,
 };
 use crate::portfolio::economic_events::TransferBoundary;
@@ -191,10 +191,16 @@ fn transfer_match(activity: &Activity, candidate: &Activity) -> bool {
 
     let activity_asset_id = activity.asset_id.as_deref().unwrap_or("").trim();
     let candidate_asset_id = candidate.asset_id.as_deref().unwrap_or("").trim();
-    let has_asset = !activity_asset_id.is_empty() || !candidate_asset_id.is_empty();
+    let activity_security_id = (!activity_asset_id.is_empty()
+        && !is_cash_symbol(activity_asset_id))
+    .then_some(activity_asset_id);
+    let candidate_security_id = (!candidate_asset_id.is_empty()
+        && !is_cash_symbol(candidate_asset_id))
+    .then_some(candidate_asset_id);
+    let has_asset = activity_security_id.is_some() || candidate_security_id.is_some();
 
     if has_asset {
-        activity_asset_id == candidate_asset_id
+        activity_security_id == candidate_security_id
             && decimal_matches(activity.quantity, candidate.quantity)
             && decimal_matches(transfer_amount(activity), transfer_amount(candidate))
     } else {

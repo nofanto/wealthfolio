@@ -83,7 +83,7 @@ pub fn requires_symbol(activity_type: &str) -> bool {
     SYMBOL_REQUIRED_TYPES.contains(&activity_type)
 }
 
-/// Recognizes cash-placeholder symbols from broker exports (e.g. `$CASH-CAD`, `CASH:USD`).
+/// Recognizes cash-placeholder symbols from broker exports (e.g. `CASH`, `$CASH-CAD`, `CASH:USD`).
 pub fn is_cash_symbol(symbol: &str) -> bool {
     let s = symbol.trim();
     if s.is_empty() {
@@ -92,6 +92,9 @@ pub fn is_cash_symbol(symbol: &str) -> bool {
     // $CASH-XXX, $CASH_XXX, CASH-XXX, CASH_XXX, CASH:XXX (case-insensitive)
     let upper = s.to_uppercase();
     let stripped = upper.strip_prefix('$').unwrap_or(&upper);
+    if stripped == "CASH" {
+        return true;
+    }
     if let Some(rest) = stripped.strip_prefix("CASH") {
         if let Some(currency) = rest
             .strip_prefix('-')
@@ -329,6 +332,8 @@ mod tests {
 
     #[test]
     fn test_is_cash_symbol_valid_patterns() {
+        assert!(is_cash_symbol("CASH"));
+        assert!(is_cash_symbol("$CASH"));
         assert!(is_cash_symbol("$CASH-CAD"));
         assert!(is_cash_symbol("$CASH-USD"));
         assert!(is_cash_symbol("$CASH-EUR"));
@@ -346,8 +351,6 @@ mod tests {
         assert!(!is_cash_symbol(""));
         assert!(!is_cash_symbol("   "));
         assert!(!is_cash_symbol("AAPL"));
-        assert!(!is_cash_symbol("$CASH"));
-        assert!(!is_cash_symbol("CASH"));
         assert!(!is_cash_symbol("$CASH-TOOLONG"));
         assert!(!is_cash_symbol("$CASH-12"));
         assert!(!is_cash_symbol("$CASH-A"));

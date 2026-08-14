@@ -143,6 +143,22 @@ pub fn denormalization_multiplier(currency: &str) -> Decimal {
     }
 }
 
+/// Smallest standard accounting unit for a currency. Used when comparing
+/// independently reported and derived cash totals.
+pub fn currency_rounding_tolerance(currency: &str) -> Decimal {
+    let fraction_digits = match normalize_currency_code(currency)
+        .to_ascii_uppercase()
+        .as_str()
+    {
+        "BIF" | "CLP" | "DJF" | "GNF" | "ISK" | "JPY" | "KMF" | "KRW" | "PYG" | "RWF" | "UGX"
+        | "VND" | "VUV" | "XAF" | "XOF" | "XPF" => 0,
+        "BHD" | "IQD" | "JOD" | "KWD" | "LYD" | "OMR" | "TND" => 3,
+        "CLF" => 4,
+        _ => 2,
+    };
+    Decimal::ONE / Decimal::from(10_i64.pow(fraction_digits))
+}
+
 /// Resolves currency from a priority list of candidates.
 /// Returns the first non-empty candidate, or "USD" as the ultimate fallback.
 pub fn resolve_currency(candidates: &[&str]) -> String {

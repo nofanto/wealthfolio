@@ -8,6 +8,7 @@
 
 use crate::activities::activities_constants::*;
 use crate::activities::{Activity, NewActivity};
+use crate::portfolio::economic_events::ActivityEconomicsResolver;
 use crate::Result;
 use rust_decimal::Decimal;
 
@@ -100,7 +101,7 @@ impl DefaultActivityCompiler {
     ///   asset_id = rewarded token
     ///   quantity = reward quantity
     ///   unit_price = FMV at receipt
-    ///   amount = quantity * unit_price
+    ///   amount = authoritative receipt value (derived from quantity * unit_price only when absent)
     ///
     /// Compiled:
     ///   1. INTEREST: income recognition
@@ -134,12 +135,7 @@ impl DefaultActivityCompiler {
         income_id_suffix: &str,
     ) -> Vec<Activity> {
         let quantity = activity.quantity.unwrap_or(Decimal::ZERO);
-        let derived_amount = activity.unit_price.map(|unit_price| quantity * unit_price);
-        let income_amount = activity
-            .amount
-            .filter(|amount| !amount.is_zero())
-            .or(derived_amount)
-            .or(activity.amount);
+        let income_amount = ActivityEconomicsResolver::resolve_cash(activity, Decimal::ONE).amount;
         // A non-positive unit_price (forms can carry stale 0s) only stands as the
         // acquisition price when no price can be derived from the income amount —
         // e.g. a dust reward where FMV and amount are both genuinely zero.
@@ -148,11 +144,10 @@ impl DefaultActivityCompiler {
             .filter(|price| price.is_sign_positive() && !price.is_zero())
             .or_else(|| {
                 income_amount.and_then(|amount| {
-                    let reinvested_amount = amount - activity.fee_amt() - activity.tax_amt();
-                    if quantity.is_zero() || reinvested_amount <= Decimal::ZERO {
+                    if quantity.is_zero() || amount <= Decimal::ZERO {
                         None
                     } else {
-                        Some(reinvested_amount / quantity)
+                        Some(amount / quantity)
                     }
                 })
             })
@@ -168,15 +163,15 @@ impl DefaultActivityCompiler {
         income_leg.unit_price = None;
         income_leg.amount = income_amount;
 
-        // Leg 2: BUY. Explicit unit_price is the reinvestment/FMV price; when
-        // absent, derive from net income available after income-side charges.
+        // Leg 2: BUY. Explicit unit_price is preserved as reported; when absent,
+        // derive it from the authoritative reinvested cash amount.
         let mut buy_leg = activity.clone();
         buy_leg.id = format!("{}:buy", activity.id);
         buy_leg.activity_type = ACTIVITY_TYPE_BUY.to_string();
         buy_leg.activity_type_override = None;
         buy_leg.subtype = None;
         buy_leg.unit_price = acquisition_unit_price;
-        buy_leg.amount = None;
+        buy_leg.amount = income_amount;
         buy_leg.fee = Some(Decimal::ZERO);
         buy_leg.tax = Some(Decimal::ZERO);
 
@@ -194,7 +189,7 @@ impl Default for DefaultActivityCompiler {
 mod tests {
     use super::*;
     use crate::activities::ActivityStatus;
-    use chrono::Utc;
+    use chrono::{Duration, Utc};
     use rust_decimal_macros::dec;
 
     fn create_test_activity() -> Activity {
@@ -242,6 +237,44 @@ mod tests {
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].id, activity.id);
         assert_eq!(result[0].activity_type, ACTIVITY_TYPE_BUY);
+    }
+
+    #[test]
+    fn test_compile_trade_keeps_settlement_date_as_metadata() {
+        let compiler = DefaultActivityCompiler::new();
+        let mut activity = create_test_activity();
+        activity.activity_type = ACTIVITY_TYPE_BUY.to_string();
+        activity.amount = Some(dec!(100));
+        activity.activity_date = Utc::now();
+        activity.settlement_date = Some(activity.activity_date + Duration::days(2));
+
+        let result = compiler.compile(&activity).unwrap();
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].id, activity.id);
+        assert_eq!(result[0].activity_type, ACTIVITY_TYPE_BUY);
+        assert_eq!(result[0].settlement_date, activity.settlement_date);
+    }
+
+    #[test]
+    fn test_compile_drip_with_settlement_metadata_keeps_equal_cash_legs() {
+        let compiler = DefaultActivityCompiler::new();
+        let mut activity = create_test_activity();
+        activity.activity_type = ACTIVITY_TYPE_DIVIDEND.to_string();
+        activity.subtype = Some(ACTIVITY_SUBTYPE_DRIP.to_string());
+        activity.quantity = Some(dec!(0.001));
+        activity.unit_price = Some(dec!(589.8108));
+        activity.amount = Some(dec!(0.30));
+        activity.settlement_date = Some(activity.activity_date + Duration::days(2));
+
+        let result = compiler.compile(&activity).unwrap();
+
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].amount, Some(dec!(0.30)));
+        assert_eq!(result[1].amount, Some(dec!(0.30)));
+        assert!(result
+            .iter()
+            .all(|posting| posting.settlement_date == activity.settlement_date));
     }
 
     #[test]
@@ -305,14 +338,14 @@ mod tests {
         assert!(result[1].subtype.is_none());
         assert_eq!(result[1].quantity, Some(dec!(5)));
         assert_eq!(result[1].unit_price, Some(dec!(20)));
-        assert!(result[1].amount.is_none());
+        assert_eq!(result[1].amount, Some(dec!(100)));
         assert_eq!(result[1].fee, Some(dec!(0)));
     }
 
     /// Materializes the asset-income precedence rules:
-    /// - acquisition price: explicit positive unit_price → derived from net
-    ///   income (amount - fee - tax) / quantity → raw unit_price fallback
-    /// - income amount: non-zero amount → quantity * unit_price → raw amount
+    /// - acquisition price: explicit positive unit_price → authoritative cash
+    ///   amount / quantity → raw unit_price fallback
+    /// - income amount: supplied amount wins; otherwise derive from details
     #[test]
     fn test_compile_asset_income_price_and_amount_precedence() {
         struct Case {
@@ -337,13 +370,13 @@ mod tests {
                 expected_buy_price: Some(dec!(30)),
             },
             Case {
-                name: "missing price derives net of charges",
+                name: "missing price derives from authoritative cash amount",
                 unit_price: None,
                 amount: Some(dec!(100)),
                 fee: Some(dec!(5)),
                 tax: Some(dec!(5)),
                 expected_income: Some(dec!(100)),
-                expected_buy_price: Some(dec!(18)),
+                expected_buy_price: Some(dec!(20)),
             },
             Case {
                 name: "stale zero price loses to derivable price",
@@ -382,12 +415,12 @@ mod tests {
                 expected_buy_price: None,
             },
             Case {
-                name: "zero amount with positive price derives income",
+                name: "supplied zero amount remains authoritative",
                 unit_price: Some(dec!(20)),
                 amount: Some(dec!(0)),
                 fee: None,
                 tax: None,
-                expected_income: Some(dec!(100)),
+                expected_income: Some(dec!(0)),
                 expected_buy_price: Some(dec!(20)),
             },
         ];
@@ -414,6 +447,11 @@ mod tests {
             assert_eq!(
                 result[1].unit_price, case.expected_buy_price,
                 "{}: buy price",
+                case.name
+            );
+            assert_eq!(
+                result[1].amount, case.expected_income,
+                "{}: buy cash",
                 case.name
             );
         }
@@ -453,8 +491,8 @@ mod tests {
 
         // Dividend leg  amount = qty * price so that it offsets the BUY
         assert_eq!(result[0].amount, Some(dec!(100)));
-        // BUY leg still has no amount (computed by calculator)
-        assert!(result[1].amount.is_none());
+        // BUY uses the same authoritative amount, so the two cash legs net to zero.
+        assert_eq!(result[1].amount, Some(dec!(100)));
     }
 
     #[test]
@@ -480,7 +518,7 @@ mod tests {
     }
 
     #[test]
-    fn test_compile_drip_without_price_derives_buy_price_from_net_reinvested_income() {
+    fn test_compile_drip_without_price_derives_buy_price_from_authoritative_cash() {
         let compiler = DefaultActivityCompiler::new();
         let mut activity = create_test_activity();
         activity.activity_type = ACTIVITY_TYPE_DIVIDEND.to_string();
@@ -499,7 +537,7 @@ mod tests {
         assert_eq!(result[0].fee, Some(dec!(5)));
         assert_eq!(result[0].tax, Some(dec!(15)));
         assert_eq!(result[1].activity_type, ACTIVITY_TYPE_BUY);
-        assert_eq!(result[1].unit_price, Some(dec!(20)));
+        assert_eq!(result[1].unit_price, Some(dec!(25)));
         assert_eq!(result[1].fee, Some(Decimal::ZERO));
         assert_eq!(result[1].tax, Some(Decimal::ZERO));
     }
@@ -533,7 +571,7 @@ mod tests {
         assert!(result[1].subtype.is_none());
         assert_eq!(result[1].quantity, Some(dec!(0.01)));
         assert_eq!(result[1].unit_price, Some(dec!(2000)));
-        assert!(result[1].amount.is_none());
+        assert_eq!(result[1].amount, Some(dec!(20)));
         assert_eq!(result[1].fee, Some(dec!(0)));
     }
 
@@ -562,7 +600,7 @@ mod tests {
         assert_eq!(result[1].activity_type, ACTIVITY_TYPE_BUY);
         assert_eq!(result[1].quantity, Some(dec!(0.000000329)));
         assert_eq!(result[1].unit_price, Some(dec!(0)));
-        assert!(result[1].amount.is_none());
+        assert_eq!(result[1].amount, Some(dec!(0)));
         assert_eq!(result[1].fee, Some(dec!(0)));
     }
 
@@ -585,7 +623,7 @@ mod tests {
         assert_eq!(result[1].activity_type, ACTIVITY_TYPE_BUY);
         assert_eq!(result[1].quantity, Some(dec!(0.01)));
         assert_eq!(result[1].unit_price, Some(dec!(2000)));
-        assert!(result[1].amount.is_none());
+        assert_eq!(result[1].amount, Some(dec!(20)));
     }
 
     #[test]
@@ -607,7 +645,7 @@ mod tests {
     }
 
     #[test]
-    fn test_compile_staking_reward_derives_amount_when_explicit_amount_is_zero() {
+    fn test_compile_staking_reward_trusts_explicit_zero_amount() {
         let compiler = DefaultActivityCompiler::new();
         let mut activity = create_test_activity();
         activity.activity_type = ACTIVITY_TYPE_INTEREST.to_string();
@@ -620,7 +658,8 @@ mod tests {
         let result = compiler.compile(&activity).unwrap();
 
         assert_eq!(result.len(), 2);
-        assert_eq!(result[0].amount, Some(dec!(20)));
+        assert_eq!(result[0].amount, Some(dec!(0)));
+        assert_eq!(result[1].amount, Some(dec!(0)));
         assert_eq!(result[1].unit_price, Some(dec!(2000)));
     }
 
@@ -671,7 +710,7 @@ mod tests {
         assert_eq!(result[1].asset_id, Some("AAPL".to_string()));
         assert_eq!(result[1].quantity, Some(dec!(10)));
         assert_eq!(result[1].unit_price, Some(dec!(25)));
-        assert!(result[1].amount.is_none());
+        assert_eq!(result[1].amount, Some(dec!(250)));
     }
 
     #[test]

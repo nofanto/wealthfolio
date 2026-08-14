@@ -929,6 +929,49 @@ mod tests {
     }
 
     #[test]
+    fn settlement_date_is_metadata_and_trade_updates_position_and_cash_together() {
+        let account_currency = "USD";
+        let base_currency = Arc::new(RwLock::new(account_currency.to_string()));
+        let mut calculator = create_calculator(Arc::new(MockFxService::new()), base_currency);
+        let trade_date = NaiveDate::from_ymd_opt(2026, 3, 31).unwrap();
+        let settlement_date = NaiveDate::from_ymd_opt(2026, 4, 2).unwrap();
+        let previous_snapshot = create_initial_snapshot("acc_1", account_currency, "2026-03-30");
+        let mut buy = create_default_activity(
+            "drip-buy",
+            ActivityType::Buy,
+            "AAPL",
+            dec!(0.001),
+            dec!(589.8108),
+            Decimal::ZERO,
+            account_currency,
+            "2026-03-31",
+        );
+        buy.amount = Some(dec!(0.30));
+        buy.settlement_date =
+            Some(Utc.from_utc_datetime(&settlement_date.and_hms_opt(0, 0, 0).unwrap()));
+
+        let postings = DefaultActivityCompiler::new().compile(&buy).unwrap();
+        assert_eq!(postings.len(), 1);
+
+        let trade_state = calculator
+            .calculate_next_holdings(&previous_snapshot, &postings, trade_date)
+            .unwrap()
+            .snapshot;
+
+        assert_eq!(trade_state.positions["AAPL"].quantity, dec!(0.001));
+        assert_eq!(trade_state.positions["AAPL"].total_cost_basis, dec!(0.30));
+        assert_eq!(
+            trade_state
+                .cash_balances
+                .get(account_currency)
+                .copied()
+                .unwrap_or_default(),
+            dec!(-0.30)
+        );
+        assert_eq!(trade_state.net_contribution, Decimal::ZERO);
+    }
+
+    #[test]
     fn test_dividend_in_kind_compiles_to_zero_cash_and_no_contribution() {
         let mock_fx_service = MockFxService::new();
         let account_currency = "USD";
@@ -1516,11 +1559,8 @@ mod tests {
         assert!(result.is_ok(), "Calculation failed: {:?}", result.err());
         let next_state = result.unwrap().snapshot;
 
-        // Check cash balance (booked in ACTIVITY currency - USD, per design spec)
-        // Deposit amount in USD: 100 USD
-        // Fee in USD: 1 USD
-        // Net deposit amount in USD: 100 - 1 = 99 USD
-        let net_deposit_usd = deposit_usd_activity.price() - deposit_usd_activity.fee_amt();
+        // The stored amount is the final cash credit, including charges.
+        let net_deposit_usd = deposit_usd_activity.amt();
         assert_eq!(
             next_state.cash_balances.get(activity_currency),
             Some(&net_deposit_usd) // 99 USD
@@ -1643,11 +1683,8 @@ mod tests {
         let next_state = result.unwrap().snapshot;
 
         // Check cash balance (booked in ACTIVITY currency - USD, per design spec)
-        // Withdrawal amount in USD: 50 USD
-        // Fee in USD: 2 USD
-        // Total withdrawal in USD: 50 + 2 = 52 USD (outflow)
-        let total_withdrawal_usd =
-            withdrawal_usd_activity.price() + withdrawal_usd_activity.fee_amt();
+        // The stored amount is the final cash debit, including charges.
+        let total_withdrawal_usd = withdrawal_usd_activity.amt();
         assert_eq!(
             next_state.cash_balances.get(activity_currency),
             Some(&(-total_withdrawal_usd)) // -52 USD
@@ -1875,13 +1912,9 @@ mod tests {
         assert!(result.is_ok(), "Calculation failed: {:?}", result.err());
         let next_state = result.unwrap().snapshot;
 
-        // Check cash balances (booked in respective ACTIVITY currencies, per design spec)
-        // Initial cash: 1000 CAD
-        // Dividend (CAD): 50 CAD gross - 5 CAD withholding tax -> CAD balance = 1045 CAD
-        // Interest (USD): 20 USD gross - 1 USD fee = 19 USD net -> USD balance = 19 USD
-        let net_dividend_cad =
-            dividend_activity.price() - dividend_activity.fee_amt() - dividend_activity.tax_amt();
-        let net_interest_usd = interest_activity_usd.price() - interest_activity_usd.fee_amt();
+        // Stored amounts are the final cash credits; charges are already included.
+        let net_dividend_cad = dividend_activity.amt();
+        let net_interest_usd = interest_activity_usd.amt();
 
         let expected_cash_cad = previous_snapshot
             .cash_balances
@@ -1946,10 +1979,10 @@ mod tests {
         assert!(result.is_ok(), "Calculation failed: {:?}", result.err());
         let next_state = result.unwrap().snapshot;
 
-        // Cash: 1000 + (100 - 2 fee - 10 tax) = 1088
+        // Cash: 1000 + final cash amount 100 = 1100.
         assert_eq!(
             next_state.cash_balances.get(account_currency),
-            Some(&dec!(1088))
+            Some(&dec!(1100))
         );
         // Non-BONUS credit does not affect net_contribution
         assert_eq!(
@@ -1994,10 +2027,10 @@ mod tests {
         assert!(result.is_ok(), "Calculation failed: {:?}", result.err());
         let next_state = result.unwrap().snapshot;
 
-        // Cash: 1000 + (100 - 2 fee - 10 tax) = 1088
+        // Cash: 1000 + final cash amount 100 = 1100.
         assert_eq!(
             next_state.cash_balances.get(account_currency),
-            Some(&dec!(1088))
+            Some(&dec!(1100))
         );
         // BONUS credit adds GROSS amount to net_contribution: 500 + 100 = 600
         assert_eq!(next_state.net_contribution, dec!(600));
@@ -2040,10 +2073,10 @@ mod tests {
         assert!(result.is_ok(), "Calculation failed: {:?}", result.err());
         let next_state = result.unwrap().snapshot;
 
-        // Cash: 1000 + (100 - 2 fee - 10 tax) = 1088
+        // Cash: 1000 + final cash amount 100 = 1100.
         assert_eq!(
             next_state.cash_balances.get(account_currency),
-            Some(&dec!(1088))
+            Some(&dec!(1100))
         );
         // net_contribution uses GROSS amount: 500 + 100 = 600
         assert_eq!(next_state.net_contribution, dec!(600));
@@ -2085,10 +2118,10 @@ mod tests {
         assert!(result.is_ok(), "Calculation failed: {:?}", result.err());
         let next_state = result.unwrap().snapshot;
 
-        // Cash: 1000 - (100 + 2 fee + 10 tax) = 888
+        // Cash: 1000 - final cash amount 100 = 900.
         assert_eq!(
             next_state.cash_balances.get(account_currency),
-            Some(&dec!(888))
+            Some(&dec!(900))
         );
         // net_contribution uses GROSS amount: 500 - 100 = 400
         assert_eq!(next_state.net_contribution, dec!(400));
@@ -2131,10 +2164,10 @@ mod tests {
         assert!(result.is_ok(), "TransferIn failed: {:?}", result.err());
         let state_after_in = result.unwrap().snapshot;
 
-        // Cash: 1000 + (100 - 2 fee - 10 tax) = 1088
+        // Cash: 1000 + final cash amount 100 = 1100.
         assert_eq!(
             state_after_in.cash_balances.get(account_currency),
-            Some(&dec!(1088))
+            Some(&dec!(1100))
         );
         // net_contribution uses GROSS amount: 500 + 100 = 600
         assert_eq!(state_after_in.net_contribution, dec!(600));
@@ -2158,17 +2191,17 @@ mod tests {
         assert!(result.is_ok(), "TransferOut failed: {:?}", result.err());
         let state_after_out = result.unwrap().snapshot;
 
-        // Cash: 1088 - (50 + 2 fee + 5 tax) = 1031
+        // Cash: 1100 - final cash amount 50 = 1050.
         assert_eq!(
             state_after_out.cash_balances.get(account_currency),
-            Some(&dec!(1031))
+            Some(&dec!(1050))
         );
         // net_contribution uses GROSS amount: 600 - 50 = 550
         assert_eq!(state_after_out.net_contribution, dec!(550));
     }
 
     #[test]
-    fn test_credit_card_interest_books_as_liability_charge() {
+    fn test_credit_card_interest_follows_activity_type_direction() {
         let mock_fx_service = MockFxService::new();
         let target_date_str = "2023-01-06";
         let target_date = NaiveDate::from_str(target_date_str).unwrap();
@@ -2203,9 +2236,9 @@ mod tests {
 
         assert_eq!(
             next_state.cash_balances.get(account_currency),
-            Some(&dec!(-125))
+            Some(&dec!(-75))
         );
-        assert_eq!(next_state.cash_total_account_currency, dec!(-125));
+        assert_eq!(next_state.cash_total_account_currency, dec!(-75));
         assert_eq!(
             next_state.net_contribution,
             previous_snapshot.net_contribution
@@ -2256,7 +2289,7 @@ mod tests {
     }
 
     #[test]
-    fn test_trade_amount_policy_equity_buy_ignores_inflated_amount() {
+    fn test_trade_amount_policy_equity_buy_trusts_reported_amount() {
         let mock_fx_service = Arc::new(MockFxService::new());
         let account_currency = "USD";
         let base_currency = Arc::new(RwLock::new(account_currency.to_string()));
@@ -2284,18 +2317,18 @@ mod tests {
 
         let position = next_state.positions.get("AAPL").unwrap();
         assert_eq!(position.quantity, dec!(10));
-        assert_eq!(position.average_cost, dec!(100.25));
-        assert_eq!(position.total_cost_basis, dec!(1002.50));
-        assert_eq!(position.lots[0].acquisition_price, dec!(99.76));
+        assert_eq!(position.average_cost, dec!(997.60));
+        assert_eq!(position.total_cost_basis, dec!(9976));
+        assert_eq!(position.lots[0].acquisition_price, dec!(997.11));
         assert_eq!(
             next_state.cash_balances.get(account_currency),
-            Some(&dec!(-1002.50))
+            Some(&dec!(-9976))
         );
-        assert_eq!(next_state.cost_basis, dec!(1002.50));
+        assert_eq!(next_state.cost_basis, dec!(9976));
     }
 
     #[test]
-    fn test_trade_amount_policy_equity_sell_ignores_inflated_amount() {
+    fn test_trade_amount_policy_equity_sell_trusts_reported_amount() {
         let mock_fx_service = Arc::new(MockFxService::new());
         let account_currency = "USD";
         let base_currency = Arc::new(RwLock::new(account_currency.to_string()));
@@ -2341,7 +2374,7 @@ mod tests {
         assert_eq!(position.total_cost_basis, dec!(250));
         assert_eq!(
             next_state.cash_balances.get(account_currency),
-            Some(&dec!(-201))
+            Some(&dec!(5500))
         );
         assert_eq!(next_state.cost_basis, dec!(250));
     }
@@ -2419,14 +2452,14 @@ mod tests {
 
         let position = next_state.positions.get("AAPL").unwrap();
         assert_eq!(position.quantity, dec!(10));
-        assert_eq!(position.average_cost, dec!(100.25));
-        assert_eq!(position.total_cost_basis, dec!(1002.50));
-        assert_eq!(position.lots[0].acquisition_price, dec!(99.76));
+        assert_eq!(position.average_cost, dec!(99.76));
+        assert_eq!(position.total_cost_basis, dec!(997.60));
+        assert_eq!(position.lots[0].acquisition_price, dec!(99.27));
         assert_eq!(
             next_state.cash_balances.get(account_currency),
-            Some(&dec!(-1002.50))
+            Some(&dec!(-997.60))
         );
-        assert_eq!(next_state.cost_basis, dec!(1002.50));
+        assert_eq!(next_state.cost_basis, dec!(997.60));
     }
 
     #[test]
@@ -2462,10 +2495,7 @@ mod tests {
         assert_eq!(position.average_cost, dec!(100.25));
         assert_eq!(position.total_cost_basis, dec!(1002.50));
         assert_eq!(position.lots[0].acquisition_price, dec!(99.76));
-        assert_eq!(
-            next_state.cash_balances.get(account_currency),
-            Some(&dec!(-4.90))
-        );
+        assert!(next_state.cash_balances.get(account_currency).is_none());
         assert_eq!(next_state.net_contribution, dec!(1002.50));
     }
 
@@ -2502,10 +2532,7 @@ mod tests {
         assert_eq!(position.average_cost, dec!(998.09));
         assert_eq!(position.total_cost_basis, dec!(9980.90));
         assert_eq!(position.lots[0].acquisition_price, dec!(997.60));
-        assert_eq!(
-            next_state.cash_balances.get(account_currency),
-            Some(&dec!(-4.90))
-        );
+        assert!(next_state.cash_balances.get(account_currency).is_none());
         assert_eq!(next_state.net_contribution, dec!(9980.90));
     }
 
@@ -2754,24 +2781,14 @@ mod tests {
         assert_eq!(position_tsla.total_cost_basis, dec!(2005)); // (10 * 200) + 5 USD
         assert_eq!(position_tsla.currency, asset_currency); // USD
 
-        // Check cash after External TransferIn (fee booked in ACTIVITY currency - USD, per design spec)
-        // Fee was 5 USD -> USD balance = -5 USD
-        // CAD balance unchanged: 1000 CAD
-        let fee_add_usd = add_holding_activity.fee_amt();
-        assert_eq!(
-            state_after_add.cash_balances.get(asset_currency),
-            Some(&(-fee_add_usd)) // -5 USD
-        );
+        // A security transfer is non-cash; charges must be separate activities.
+        assert!(state_after_add.cash_balances.get(asset_currency).is_none());
         assert_eq!(
             state_after_add.cash_balances.get(account_currency),
             Some(&dec!(1000)) // Unchanged 1000 CAD
         );
         // Verify cash_total_account_currency
-        let expected_cash_total_add = dec!(1000) + (-fee_add_usd * rate_add_date); // 1000 - 6.5 = 993.5 CAD
-        assert_eq!(
-            state_after_add.cash_total_account_currency,
-            expected_cash_total_add
-        );
+        assert_eq!(state_after_add.cash_total_account_currency, dec!(1000));
 
         // Check net contribution after External TransferIn (in CAD)
         // Cost basis added was 10 shares * 200 USD/share + 5 USD fee = 2005 USD.
@@ -2820,28 +2837,16 @@ mod tests {
         assert_eq!(position_tsla_after_remove.average_cost, dec!(200.5)); // Average cost remains
         assert_eq!(position_tsla_after_remove.total_cost_basis, dec!(1203)); // 6 * 200.5 USD
 
-        // Check cash after External TransferOut (fee booked in ACTIVITY currency - USD, per design spec)
-        // Previous USD balance: -5 USD (from TransferIn fee)
-        // TransferOut fee: -2 USD
-        // Expected USD balance: -5 - 2 = -7 USD
-        // CAD balance unchanged: 1000 CAD
-        let fee_remove_usd = remove_holding_activity.fee_amt();
-        let expected_usd_after_remove = -fee_add_usd - fee_remove_usd; // -5 - 2 = -7 USD
-        assert_eq!(
-            state_after_remove.cash_balances.get(asset_currency),
-            Some(&expected_usd_after_remove)
-        );
+        assert!(state_after_remove
+            .cash_balances
+            .get(asset_currency)
+            .is_none());
         assert_eq!(
             state_after_remove.cash_balances.get(account_currency),
             Some(&dec!(1000)) // Unchanged 1000 CAD
         );
         // Verify cash_total_account_currency
-        let expected_cash_total_remove =
-            dec!(1000) + (expected_usd_after_remove * rate_remove_date); // 1000 - 9.1 = 990.9 CAD
-        assert_eq!(
-            state_after_remove.cash_total_account_currency,
-            expected_cash_total_remove
-        );
+        assert_eq!(state_after_remove.cash_total_account_currency, dec!(1000));
 
         // Check net contribution after External TransferOut (in CAD)
         // Cost basis removed was 4 shares * 200.5 USD/share (FIFO cost) = 802 USD.
@@ -2927,24 +2932,19 @@ mod tests {
         assert_eq!(position_testusd.average_cost, dec!(120.2)); // (120 * 50 + 10) / 50 USD
         assert_eq!(position_testusd.total_cost_basis, dec!(6010)); // (50 * 120) + 10 USD
 
-        // Cash checks (fee booked in ACTIVITY currency - USD, per design spec)
-        // Fee was 10 USD -> USD balance = -10 USD
-        // CAD balance unchanged: 5000 CAD
-        let fee_in_asset_tx_in_usd = transfer_in_asset_activity.fee_amt(); // 10 USD
-        assert_eq!(
-            state_after_asset_tx_in.cash_balances.get(asset_currency),
-            Some(&(-fee_in_asset_tx_in_usd)) // -10 USD
-        );
+        // Security transfers are non-cash.
+        assert!(state_after_asset_tx_in
+            .cash_balances
+            .get(asset_currency)
+            .is_none());
         assert_eq!(
             state_after_asset_tx_in.cash_balances.get(account_currency),
             Some(&dec!(5000)) // Unchanged 5000 CAD
         );
         // Verify cash_total_account_currency
-        let expected_cash_total_asset_tx_in =
-            dec!(5000) + (-fee_in_asset_tx_in_usd * rate_asset_date); // 5000 - 13 = 4987 CAD
         assert_eq!(
             state_after_asset_tx_in.cash_total_account_currency,
-            expected_cash_total_asset_tx_in
+            dec!(5000)
         );
 
         // Net Contribution (CAD) - Transfers affect account-level net_contribution
@@ -2991,27 +2991,18 @@ mod tests {
         assert_eq!(position_testusd_after_out.average_cost, dec!(120.2)); // Remains same
         assert_eq!(position_testusd_after_out.total_cost_basis, dec!(3606)); // 30 * 120.2 USD
 
-        // Cash checks (fee booked in ACTIVITY currency - USD, per design spec)
-        // Previous USD balance: -10 USD (from TransferIn fee)
-        // TransferOut fee: -5 USD
-        // Expected USD balance: -10 - 5 = -15 USD
-        // CAD balance unchanged: 5000 CAD
-        let fee_out_asset_tx_usd = transfer_out_asset_activity.fee_amt(); // 5 USD
-        let expected_usd_after_asset_tx_out = -fee_in_asset_tx_in_usd - fee_out_asset_tx_usd; // -10 - 5 = -15 USD
-        assert_eq!(
-            state_after_asset_tx_out.cash_balances.get(asset_currency),
-            Some(&expected_usd_after_asset_tx_out) // -15 USD
-        );
+        assert!(state_after_asset_tx_out
+            .cash_balances
+            .get(asset_currency)
+            .is_none());
         assert_eq!(
             state_after_asset_tx_out.cash_balances.get(account_currency),
             Some(&dec!(5000)) // Unchanged 5000 CAD
         );
         // Verify cash_total_account_currency
-        let expected_cash_total_asset_tx_out =
-            dec!(5000) + (expected_usd_after_asset_tx_out * rate_asset_date); // 5000 - 19.5 = 4980.5 CAD
         assert_eq!(
             state_after_asset_tx_out.cash_total_account_currency,
-            expected_cash_total_asset_tx_out
+            dec!(5000)
         );
 
         // Net Contribution (CAD) - Transfers affect account-level net_contribution
@@ -3056,13 +3047,10 @@ mod tests {
         let state_after_cash_tx_in = result_cash_tx_in.unwrap().snapshot;
 
         // Cash checks (booked in ACTIVITY currency - USD, per design spec)
-        // Previous USD balance: -15 USD (from asset transfer fees)
-        // Cash TransferIn: 1000 - 8 = 992 USD net
-        // Expected USD balance: -15 + 992 = 977 USD
+        // Security transfers did not move cash. The cash transfer's stored amount
+        // is the final credit, so the USD balance becomes 1000.
         // CAD balance unchanged: 5000 CAD
-        let net_cash_in_usd =
-            transfer_in_cash_activity.price() - transfer_in_cash_activity.fee_amt(); // 1000 - 8 = 992 USD
-        let expected_usd_after_cash_tx_in = expected_usd_after_asset_tx_out + net_cash_in_usd; // -15 + 992 = 977 USD
+        let expected_usd_after_cash_tx_in = transfer_in_cash_activity.amt();
         assert_eq!(
             state_after_cash_tx_in
                 .cash_balances
@@ -3118,13 +3106,10 @@ mod tests {
         let state_after_cash_tx_out = result_cash_tx_out.unwrap().snapshot;
 
         // Cash checks (booked in ACTIVITY currency - USD, per design spec)
-        // Previous USD balance: 977 USD
-        // Cash TransferOut: -(200 + 3) = -203 USD
-        // Expected USD balance: 977 - 203 = 774 USD
+        // Cash TransferOut uses its final stored cash debit of 200.
         // CAD balance unchanged: 5000 CAD
-        let total_cash_out_usd =
-            transfer_out_cash_activity.price() + transfer_out_cash_activity.fee_amt(); // 200 + 3 = 203 USD
-        let expected_usd_after_cash_tx_out = expected_usd_after_cash_tx_in - total_cash_out_usd; // 977 - 203 = 774 USD
+        let expected_usd_after_cash_tx_out =
+            expected_usd_after_cash_tx_in - transfer_out_cash_activity.amt();
         assert_eq!(
             state_after_cash_tx_out
                 .cash_balances
@@ -3488,21 +3473,21 @@ mod tests {
         );
 
         // USD Balance:
-        // USD Deposit: +98 USD (100 - 2 fee)
+        // USD Deposit: +100 USD final cash amount
         // USD Buy Stock: -51 USD (10*5 + 1 fee)
-        // Total: 98 - 51 = 47 USD
-        let expected_usd_cash = dec!(98) - dec!(51);
+        // Total: 100 - 51 = 49 USD
+        let expected_usd_cash = dec!(100) - dec!(51);
         assert_eq!(
             next_state.cash_balances.get(usd_currency),
-            Some(&expected_usd_cash), // 47 USD
+            Some(&expected_usd_cash), // 49 USD
             "USD cash balance mismatch"
         );
 
-        // EUR Balance: 195 EUR (200 - 5 fee)
-        let expected_eur_cash = dec!(195);
+        // EUR Balance: 200 EUR final cash amount
+        let expected_eur_cash = dec!(200);
         assert_eq!(
             next_state.cash_balances.get(eur_currency),
-            Some(&expected_eur_cash), // 195 EUR
+            Some(&expected_eur_cash), // 200 EUR
             "EUR cash balance mismatch"
         );
 
@@ -4372,28 +4357,14 @@ mod tests {
         assert!(result.is_ok(), "Calculation failed: {:?}", result.err());
         let next_state = result.unwrap().snapshot;
 
-        // Cash is booked in ACTIVITY currency (USD) per design spec
-        // Deposit: $500 USD -> USD balance = 500 USD
-        assert_eq!(
-            next_state.cash_balances.get(activity_currency),
-            Some(&dec!(500)), // 500 USD
-            "Deposit should be booked in activity currency (USD)"
-        );
-        // CAD balance unchanged
+        // One FX convention: account amount = activity amount × fx_rate.
+        assert!(next_state.cash_balances.get(activity_currency).is_none());
         assert_eq!(
             next_state.cash_balances.get(account_currency),
-            Some(&dec!(1000)), // 1000 CAD unchanged
-            "CAD balance should be unchanged"
+            Some(&dec!(1700))
         );
 
-        // cash_total_account_currency uses FxService rate for cash conversion
-        // 1000 CAD + (500 USD * 1.30) = 1000 + 650 = 1650 CAD
-        let deposit_in_cad_via_service = dec!(500) * service_rate;
-        let expected_cash_total_cad = dec!(1000) + deposit_in_cad_via_service;
-        assert_eq!(
-            next_state.cash_total_account_currency, expected_cash_total_cad,
-            "cash_total_account_currency uses FxService rate"
-        );
+        assert_eq!(next_state.cash_total_account_currency, dec!(1700));
 
         // Net contribution uses activity's fx_rate for conversion
         let deposit_in_cad = dec!(500) * activity_fx_rate;
@@ -4401,6 +4372,10 @@ mod tests {
         assert_eq!(
             next_state.net_contribution, expected_net_contribution,
             "Net contribution should use activity's fx_rate"
+        );
+        assert_eq!(
+            next_state.net_contribution_base, expected_net_contribution,
+            "Base net contribution should preserve the activity-to-account fx_rate when base and account currencies match"
         );
     }
 
@@ -4617,28 +4592,13 @@ mod tests {
         assert!(result.is_ok(), "Calculation failed: {:?}", result.err());
         let next_state = result.unwrap().snapshot;
 
-        // Cash is booked in ACTIVITY currency (USD) per design spec
-        // Withdrawal: -$200 USD -> USD balance = -200 USD
-        assert_eq!(
-            next_state.cash_balances.get(activity_currency),
-            Some(&dec!(-200)), // -200 USD
-            "Withdrawal should be booked in activity currency (USD)"
-        );
-        // CAD balance unchanged
+        assert!(next_state.cash_balances.get(activity_currency).is_none());
         assert_eq!(
             next_state.cash_balances.get(account_currency),
-            Some(&dec!(5000)), // 5000 CAD unchanged
-            "CAD balance should be unchanged"
+            Some(&dec!(4716))
         );
 
-        // cash_total_account_currency uses FxService rate for cash conversion
-        // 5000 CAD + (-200 USD * 1.30) = 5000 - 260 = 4740 CAD
-        let withdrawal_in_cad_via_service = dec!(200) * service_rate;
-        let expected_cash_total_cad = dec!(5000) - withdrawal_in_cad_via_service;
-        assert_eq!(
-            next_state.cash_total_account_currency, expected_cash_total_cad,
-            "cash_total_account_currency uses FxService rate"
-        );
+        assert_eq!(next_state.cash_total_account_currency, dec!(4716));
     }
 
     #[test]
@@ -4684,28 +4644,13 @@ mod tests {
         assert!(result.is_ok(), "Calculation failed: {:?}", result.err());
         let next_state = result.unwrap().snapshot;
 
-        // Cash is booked in ACTIVITY currency (USD) per design spec
-        // Dividend: $50 USD -> USD balance = 50 USD
-        assert_eq!(
-            next_state.cash_balances.get(activity_currency),
-            Some(&dec!(50)), // 50 USD
-            "Dividend should be booked in activity currency (USD)"
-        );
-        // CAD balance unchanged
+        assert!(next_state.cash_balances.get(activity_currency).is_none());
         assert_eq!(
             next_state.cash_balances.get(account_currency),
-            Some(&dec!(1000)), // 1000 CAD unchanged
-            "CAD balance should be unchanged"
+            Some(&dec!(1066.50))
         );
 
-        // cash_total_account_currency uses FxService rate for cash conversion
-        // 1000 CAD + (50 USD * 1.30) = 1000 + 65 = 1065 CAD
-        let dividend_in_cad_via_service = dec!(50) * service_rate;
-        let expected_cash_total_cad = dec!(1000) + dividend_in_cad_via_service;
-        assert_eq!(
-            next_state.cash_total_account_currency, expected_cash_total_cad,
-            "cash_total_account_currency uses FxService rate"
-        );
+        assert_eq!(next_state.cash_total_account_currency, dec!(1066.50));
     }
 
     #[test]
@@ -4756,28 +4701,16 @@ mod tests {
         assert!(result.is_ok(), "Calculation failed: {:?}", result.err());
         let next_state = result.unwrap().snapshot;
 
-        // Cash is booked in ACTIVITY currency (USD) per design spec
-        // Fee: -$10 USD -> USD balance = -10 USD
-        assert_eq!(
-            next_state.cash_balances.get(activity_currency),
-            Some(&dec!(-10)), // -10 USD
-            "Fee should be booked in activity currency (USD)"
-        );
-        // CAD balance unchanged
+        // Security transfers are non-cash; fees require separate charge activities.
+        assert!(next_state.cash_balances.get(activity_currency).is_none());
         assert_eq!(
             next_state.cash_balances.get(account_currency),
-            Some(&dec!(1000)), // 1000 CAD unchanged
-            "CAD balance should be unchanged"
+            Some(&dec!(1000))
         );
 
         // cash_total_account_currency uses FxService rate for cash conversion
         // 1000 CAD + (-10 USD * 1.30) = 1000 - 13 = 987 CAD
-        let fee_in_cad_via_service = dec!(10) * service_rate;
-        let expected_cash_total_cad = dec!(1000) - fee_in_cad_via_service;
-        assert_eq!(
-            next_state.cash_total_account_currency, expected_cash_total_cad,
-            "cash_total_account_currency uses FxService rate"
-        );
+        assert_eq!(next_state.cash_total_account_currency, dec!(1000));
 
         // Net contribution reflects transfer cost basis in account currency (fx_rate provided)
         let expected_net_contribution = dec!(1510) * activity_fx_rate;
@@ -7713,9 +7646,9 @@ mod tests {
             .calculate_next_holdings(&prev, &[transfer_out], transfer_date)
             .unwrap();
 
-        // No position created, just fee deducted
+        // No position or cash movement is created for a non-cash transfer.
         assert!(!result.snapshot.positions.contains_key("AAPL"));
-        assert_eq!(result.snapshot.cash_balances.get("USD"), Some(&dec!(-2)));
+        assert!(result.snapshot.cash_balances.get("USD").is_none());
     }
 
     #[test]

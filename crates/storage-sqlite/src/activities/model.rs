@@ -9,6 +9,7 @@ use std::str::FromStr;
 use wealthfolio_core::activities::{
     Activity, ActivityStatus, ActivityUpdate, ActivityUpsert, NewActivity,
 };
+use wealthfolio_core::assets::{Asset, InstrumentType};
 
 fn normalize_subtype_for_storage(subtype: Option<String>) -> Option<String> {
     NewActivity::canonicalize_subtype(subtype.as_deref())
@@ -312,14 +313,15 @@ impl From<ActivityDetailsDB> for wealthfolio_core::activities::ActivityDetails {
             "VOID" => ActivityStatus::Void,
             _ => ActivityStatus::Posted, // Default to Posted for unknown values
         };
-
-        let amount = db.amount.or_else(|| {
-            let q = db.quantity.as_ref()?;
-            let p = db.unit_price.as_ref()?;
-            let qty = parse_decimal_string_tolerant(q, "quantity");
-            let price = parse_decimal_string_tolerant(p, "unit_price");
-            Some((qty * price).to_string())
-        });
+        let contract_multiplier = Asset {
+            instrument_type: db
+                .instrument_type
+                .as_deref()
+                .and_then(InstrumentType::from_db_str),
+            ..Default::default()
+        }
+        .contract_multiplier()
+        .to_string();
 
         Self {
             id: db.id,
@@ -334,7 +336,7 @@ impl From<ActivityDetailsDB> for wealthfolio_core::activities::ActivityDetails {
             currency: db.currency,
             fee: db.fee,
             tax: db.tax,
-            amount,
+            amount: db.amount,
             needs_review: db.needs_review != 0,
             comment: db.notes,
             fx_rate: db.fx_rate,
@@ -349,6 +351,7 @@ impl From<ActivityDetailsDB> for wealthfolio_core::activities::ActivityDetails {
                 .asset_pricing_mode
                 .unwrap_or_else(|| "MARKET".to_string()),
             instrument_type: db.instrument_type,
+            contract_multiplier,
             source_system: db.source_system,
             source_record_id: db.source_record_id,
             source_group_id: db.source_group_id,
@@ -551,6 +554,11 @@ impl From<NewActivity> for ActivityDB {
 
         // Extract asset_id before consuming domain fields
         let asset_id = domain.get_symbol_id().map(|s| s.to_string());
+        let settlement_date = domain
+            .settlement_date
+            .as_deref()
+            .and_then(parse_db_datetime)
+            .map(|date| date.to_rfc3339());
 
         Self {
             id: domain.id.unwrap_or_default(),
@@ -566,7 +574,7 @@ impl From<NewActivity> for ActivityDB {
 
             // Timing
             activity_date: activity_datetime.to_rfc3339(),
-            settlement_date: None,
+            settlement_date,
 
             // Quantities
             quantity: domain.quantity.map(|d| d.to_string()),
@@ -641,6 +649,11 @@ impl From<ActivityUpdate> for ActivityDB {
         // Extract asset_id before consuming domain fields
         let asset_id = domain.get_symbol_id().map(|s| s.to_string());
         let subtype = normalize_subtype_for_storage(domain.subtype);
+        let settlement_date = domain
+            .settlement_date
+            .as_deref()
+            .and_then(parse_db_datetime)
+            .map(|date| date.to_rfc3339());
 
         Self {
             id: domain.id,
@@ -656,7 +669,7 @@ impl From<ActivityUpdate> for ActivityDB {
 
             // Timing
             activity_date: activity_datetime.to_rfc3339(),
-            settlement_date: None,
+            settlement_date,
 
             // Quantities
             quantity: domain.quantity.flatten().map(|d| d.to_string()),
@@ -728,6 +741,11 @@ impl From<ActivityUpsert> for ActivityDB {
             })
             .unwrap_or("POSTED")
             .to_string();
+        let settlement_date = domain
+            .settlement_date
+            .as_deref()
+            .and_then(parse_db_datetime)
+            .map(|date| date.to_rfc3339());
 
         Self {
             id: domain.id,
@@ -743,7 +761,7 @@ impl From<ActivityUpsert> for ActivityDB {
 
             // Timing
             activity_date: activity_datetime.to_rfc3339(),
-            settlement_date: None,
+            settlement_date,
 
             // Quantities
             quantity: domain.quantity.map(|d| d.to_string()),

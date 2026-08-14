@@ -2291,9 +2291,13 @@ impl PerformanceService {
         activity_type: &ActivityType,
     ) -> (Decimal, Decimal, Decimal) {
         match activity_type {
-            ActivityType::Dividend | ActivityType::Interest => {
-                (activity.amt(), activity.fee_amt(), activity.tax_amt())
-            }
+            ActivityType::Dividend | ActivityType::Interest => (
+                ActivityEconomicsResolver::resolve_cash(activity, Decimal::ONE)
+                    .gross_amount
+                    .unwrap_or(Decimal::ZERO),
+                activity.fee_amt(),
+                activity.tax_amt(),
+            ),
             ActivityType::Fee => (
                 Decimal::ZERO,
                 activity.charge_amt_for(activity_type),
@@ -8243,7 +8247,7 @@ mod tests {
         start.base_currency = "USD".to_string();
         start.external_flow_source = ExternalFlowSource::ActivityDerived;
 
-        let mut end = valuation("2026-05-02", dec!(1015), dec!(1000), dec!(1000), dec!(1000));
+        let mut end = valuation("2026-05-02", dec!(1020), dec!(1000), dec!(1000), dec!(1000));
         end.account_id = "acct".to_string();
         end.account_currency = "USD".to_string();
         end.base_currency = "USD".to_string();
@@ -8274,10 +8278,10 @@ mod tests {
             .await
             .expect("performance should finalize attribution before building summary");
 
-        assert_eq!(performance.attribution.income, dec!(20));
+        assert_eq!(performance.attribution.income, dec!(25));
         assert_eq!(performance.attribution.taxes, dec!(5));
         assert_eq!(performance.attribution.residual, Decimal::ZERO);
-        assert_eq!(performance.summary.amount, Some(dec!(15)));
+        assert_eq!(performance.summary.amount, Some(dec!(20)));
         assert!(!performance
             .summary
             .reasons
@@ -8325,7 +8329,7 @@ mod tests {
         dividend.tax = Some(dec!(3));
         assert_eq!(
             PerformanceService::activity_attribution_components(&dividend, &ActivityType::Dividend),
-            (dec!(50), dec!(2), dec!(3))
+            (dec!(55), dec!(2), dec!(3))
         );
 
         let explicit_fee = activity_fixture(ActivityType::Fee, dec!(4), Decimal::ZERO);
@@ -8341,6 +8345,7 @@ mod tests {
         );
 
         let mut explicit_tax = activity_fixture(ActivityType::Tax, Decimal::ZERO, Decimal::ZERO);
+        explicit_tax.amount = None;
         explicit_tax.tax = Some(dec!(9));
         assert_eq!(
             PerformanceService::activity_attribution_components(&explicit_tax, &ActivityType::Tax),

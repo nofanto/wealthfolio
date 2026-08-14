@@ -615,6 +615,7 @@ impl BrokerSyncServiceTrait for BrokerSyncService {
                 activity_type: act.activity_type,
                 subtype: act.subtype,
                 activity_date: act.activity_date,
+                settlement_date: act.settlement_date,
                 quantity: act.quantity,
                 unit_price: act.unit_price,
                 currency: act.currency,

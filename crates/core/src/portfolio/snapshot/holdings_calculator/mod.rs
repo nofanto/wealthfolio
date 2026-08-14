@@ -470,13 +470,13 @@ impl HoldingsCalculator {
             ActivityType::Deposit => self.handle_deposit(activity, state, account_currency),
             ActivityType::Withdrawal => self.handle_withdrawal(activity, state, account_currency),
             ActivityType::Interest if account_type == Some(account_types::CREDIT_CARD) => {
-                self.handle_charge(activity, state, &activity_type)
+                self.handle_charge(activity, state, &activity_type, account_currency)
             }
             ActivityType::Dividend | ActivityType::Interest | ActivityType::Credit => {
                 self.handle_income(activity, state, account_currency)
             }
             ActivityType::Fee | ActivityType::Tax => {
-                self.handle_charge(activity, state, &activity_type)
+                self.handle_charge(activity, state, &activity_type, account_currency)
             }
             ActivityType::TransferIn => {
                 self.handle_transfer_in(activity, state, account_currency, asset_cache, run, buffer)

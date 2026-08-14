@@ -10,6 +10,7 @@ use crate::errors::{CalculatorError, Error as CoreError, Result};
 use crate::fx::currency::{get_normalization_rule, normalize_currency_code};
 use crate::fx::FxServiceTrait;
 use crate::lots::{LotRecord, LotRepositoryTrait};
+use crate::portfolio::economic_events::ActivityEconomicsResolver;
 use crate::portfolio::holdings::holdings_model::{Holding, HoldingType, Instrument, MonetaryValue};
 use crate::portfolio::snapshot::{self, SnapshotServiceTrait};
 use crate::utils::time_utils::{activity_date_in_tz, parse_user_timezone_or_default, user_today};
@@ -968,12 +969,9 @@ fn calculate_asset_income(
 }
 
 fn activity_income_amount(activity: &Activity) -> Decimal {
-    let amount = activity.amt();
-    if amount > Decimal::ZERO {
-        amount
-    } else {
-        activity.qty() * activity.price()
-    }
+    ActivityEconomicsResolver::resolve_cash(activity, Decimal::ONE)
+        .gross_amount
+        .unwrap_or(Decimal::ZERO)
 }
 
 fn convert_income_amount(

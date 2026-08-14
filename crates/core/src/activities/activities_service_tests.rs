@@ -1602,6 +1602,24 @@ mod tests {
             Ok(count)
         }
 
+        async fn update_activity_amounts_for_migration(
+            &self,
+            updates: Vec<ActivityAmountUpdate>,
+        ) -> Result<usize> {
+            let mut activities = self.activities.lock().unwrap();
+            let mut changed = 0;
+            for update in updates {
+                if let Some(activity) = activities.iter_mut().find(|row| row.id == update.id) {
+                    activity.amount = Some(update.amount);
+                    if let Some(key) = update.idempotency_key {
+                        activity.idempotency_key = Some(key);
+                    }
+                    changed += 1;
+                }
+            }
+            Ok(changed)
+        }
+
         fn get_first_activity_date(
             &self,
             _account_ids: Option<&[String]>,
@@ -2531,6 +2549,57 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn cash_amount_migration_preserves_explicit_hashes_and_skips_missing_assets() {
+        let account_service = Arc::new(MockAccountService::new());
+        let asset_service = Arc::new(MockAssetService::new());
+        asset_service.set_get_asset_by_id_error("asset unavailable");
+        let activity_repository = Arc::new(MockActivityRepository::new());
+
+        let mut generated = create_stored_activity("generated", "acc-1", None);
+        generated.amount = Some(dec!(-100));
+        generated.idempotency_key =
+            Some(crate::activities::idempotency::compute_activity_idempotency_key(&generated));
+        let mut explicit = create_stored_activity("explicit", "acc-1", None);
+        explicit.amount = Some(dec!(-50));
+        explicit.idempotency_key = Some("a".repeat(64));
+        let mut unresolved = create_stored_activity("unresolved", "acc-1", Some("missing-option"));
+        unresolved.amount = None;
+
+        activity_repository.add_activity(generated);
+        activity_repository.add_activity(explicit);
+        activity_repository.add_activity(unresolved);
+
+        let service = ActivityService::new(
+            activity_repository.clone(),
+            account_service,
+            asset_service,
+            Arc::new(MockFxService::new()),
+            Arc::new(MockQuoteService),
+        );
+
+        assert_eq!(service.migrate_activity_cash_amounts().await.unwrap(), 2);
+        let rows = activity_repository.activities.lock().unwrap().clone();
+        let generated = rows.iter().find(|row| row.id == "generated").unwrap();
+        let explicit = rows.iter().find(|row| row.id == "explicit").unwrap();
+        let unresolved = rows.iter().find(|row| row.id == "unresolved").unwrap();
+        let expected_generated_key =
+            crate::activities::idempotency::compute_activity_idempotency_key(generated);
+
+        assert_eq!(generated.amount, Some(dec!(100)));
+        assert_eq!(
+            generated.idempotency_key.as_deref(),
+            Some(expected_generated_key.as_str())
+        );
+        assert_eq!(explicit.amount, Some(dec!(50)));
+        assert_eq!(
+            explicit.idempotency_key.as_deref(),
+            Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+        );
+        assert_eq!(unresolved.amount, None);
+        assert_eq!(service.migrate_activity_cash_amounts().await.unwrap(), 0);
+    }
+
     struct TransferActivitySeed<'a> {
         id: &'a str,
         account_id: &'a str,
@@ -2632,6 +2701,7 @@ mod tests {
             activity_type: "BUY".to_string(),
             subtype: None,
             activity_date: "2024-01-15".to_string(),
+            settlement_date: None,
             quantity: Some(Some(dec!(1))),
             unit_price: Some(Some(dec!(100))),
             currency: currency.to_string(),
@@ -2683,6 +2753,7 @@ mod tests {
                 activity_type: "TRANSFER_IN".to_string(),
                 subtype: None,
                 activity_date: "2024-01-15".to_string(),
+                settlement_date: None,
                 quantity: Some(dec!(10)),
                 unit_price: Some(dec!(8)),
                 currency: "USD".to_string(),
@@ -2711,7 +2782,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_update_price_bearing_activity_clears_stale_amount_when_account_changes() {
+    async fn test_update_price_bearing_activity_preserves_trusted_amount_when_account_changes() {
         let account_service = Arc::new(MockAccountService::new());
         let asset_service = Arc::new(MockAssetService::new());
         let fx_service = Arc::new(MockFxService::new());
@@ -2758,6 +2829,7 @@ mod tests {
                 activity_type: "BUY".to_string(),
                 subtype: None,
                 activity_date: "2024-01-15".to_string(),
+                settlement_date: None,
                 quantity: Some(Some(dec!(2))),
                 unit_price: Some(Some(dec!(70))),
                 currency: "CAD".to_string(),
@@ -2773,7 +2845,7 @@ mod tests {
             .expect("update should succeed");
 
         assert_eq!(updated.account_id, "acc-cad");
-        assert_eq!(updated.amount, None);
+        assert_eq!(updated.amount, Some(dec!(100)));
         assert_eq!(updated.quantity, Some(dec!(2)));
         assert_eq!(updated.unit_price, Some(dec!(70)));
     }
@@ -2824,6 +2896,7 @@ mod tests {
                 activity_type: "BUY".to_string(),
                 subtype: None,
                 activity_date: "2024-01-15".to_string(),
+                settlement_date: None,
                 quantity: Some(Some(dec!(1000))),
                 unit_price: Some(Some(dec!(98))),
                 currency: "USD".to_string(),
@@ -2871,6 +2944,7 @@ mod tests {
             activity_type: "SPLIT".to_string(),
             subtype: None,
             activity_date: "2024-01-15".to_string(),
+            settlement_date: None,
             quantity: None,
             unit_price: None,
             currency: "USD".to_string(),
@@ -2928,6 +3002,7 @@ mod tests {
             activity_type: "SPLIT".to_string(),
             subtype: None,
             activity_date: "2024-01-15".to_string(),
+            settlement_date: None,
             quantity: None,
             unit_price: None,
             currency: "USD".to_string(),
@@ -3076,6 +3151,7 @@ mod tests {
             activity_type: "BUY".to_string(),
             subtype: None,
             activity_date: "2024-01-15".to_string(),
+            settlement_date: None,
             quantity: Some(dec!(1)),
             unit_price: Some(dec!(100)),
             currency: "USD".to_string(),
@@ -3120,6 +3196,7 @@ mod tests {
             activity_type: activity_type.to_string(),
             subtype: None,
             activity_date: "2024-01-15".to_string(),
+            settlement_date: None,
             quantity: None,
             unit_price: None,
             currency: currency.to_string(),
@@ -3393,6 +3470,7 @@ mod tests {
                     activity_type: "BUY".to_string(),
                     subtype: None,
                     activity_date: "2024-01-15".to_string(),
+                    settlement_date: None,
                     quantity: Some(dec!(1)),
                     unit_price: Some(dec!(100)),
                     currency: "USD".to_string(),
@@ -3468,6 +3546,7 @@ mod tests {
             activity_type: "BUY".to_string(),
             subtype: None,
             activity_date: "2024-01-15".to_string(),
+            settlement_date: None,
             quantity: Some(dec!(10)),
             unit_price: Some(dec!(100)),
             currency: "USD".to_string(), // Same as account currency
@@ -3542,6 +3621,7 @@ mod tests {
             activity_type: "BUY".to_string(),
             subtype: None,
             activity_date: "2024-01-15".to_string(),
+            settlement_date: None,
             quantity: Some(dec!(10)),
             unit_price: Some(dec!(100)),
             currency: "EUR".to_string(), // Different from account currency
@@ -3607,6 +3687,7 @@ mod tests {
             activity_type: "BUY".to_string(),
             subtype: None,
             activity_date: "2026-02-27T21:32:00Z".to_string(),
+            settlement_date: None,
             quantity: Some(dec!(25)),
             unit_price: Some(dec!(51.90)),
             currency: "USD".to_string(),
@@ -3642,7 +3723,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_create_rejects_same_trade_with_different_tax() {
+    async fn test_create_distinguishes_same_trade_with_different_final_cash_total() {
         let account_service = Arc::new(MockAccountService::new());
         let asset_service = Arc::new(MockAssetService::new());
         let fx_service = Arc::new(MockFxService::new());
@@ -3670,6 +3751,7 @@ mod tests {
             activity_type: "BUY".to_string(),
             subtype: None,
             activity_date: "2026-02-27T21:32:00Z".to_string(),
+            settlement_date: None,
             quantity: Some(dec!(25)),
             unit_price: Some(dec!(51.90)),
             currency: "USD".to_string(),
@@ -3695,20 +3777,17 @@ mod tests {
 
         let mut different_tax_activity = taxable_activity;
         different_tax_activity.tax = Some(dec!(2));
-        let err = activity_service
+        activity_service
             .create_activity(different_tax_activity)
             .await
-            .expect_err("same trade with different tax should still be a duplicate");
+            .expect("different final cash totals are distinct economic records");
 
         let stored = activity_repository
             .get_activities()
             .expect("stored activities should be readable");
-        assert_eq!(stored.len(), 1);
-        assert!(
-            err.to_string().contains("Duplicate activity detected"),
-            "error should clearly explain duplicate detection: {}",
-            err
-        );
+        assert_eq!(stored.len(), 2);
+        assert_ne!(stored[0].amount, stored[1].amount);
+        assert_ne!(stored[0].idempotency_key, stored[1].idempotency_key);
     }
 
     #[tokio::test]
@@ -3740,6 +3819,7 @@ mod tests {
             activity_type: "BUY".to_string(),
             subtype: None,
             activity_date: "2026-02-27T21:32:00Z".to_string(),
+            settlement_date: None,
             quantity: Some(dec!(25)),
             unit_price: Some(dec!(51.90)),
             currency: "USD".to_string(),
@@ -3801,6 +3881,7 @@ mod tests {
                 activity_type: "BUY".to_string(),
                 subtype: None,
                 activity_date: "2026-02-27T21:32:00Z".to_string(),
+                settlement_date: None,
                 quantity: Some(dec!(25)),
                 unit_price: Some(dec!(51.90)),
                 currency: "USD".to_string(),
@@ -4129,6 +4210,7 @@ mod tests {
             activity_type: "BUY".to_string(),
             subtype: None,
             activity_date: "2024-01-15".to_string(),
+            settlement_date: None,
             quantity: Some(dec!(10)),
             unit_price: Some(dec!(150)),
             currency: "USD".to_string(),
@@ -4207,6 +4289,7 @@ mod tests {
             activity_type: "BUY".to_string(),
             subtype: None,
             activity_date: "2024-01-15".to_string(),
+            settlement_date: None,
             quantity: Some(dec!(10)),
             unit_price: Some(dec!(150)),
             currency: "USD".to_string(),
@@ -4275,6 +4358,7 @@ mod tests {
             activity_type: "BUY".to_string(),
             subtype: None,
             activity_date: "2024-01-15".to_string(),
+            settlement_date: None,
             quantity: Some(dec!(5)),
             unit_price: Some(dec!(200)),
             currency: "USD".to_string(),
@@ -4336,6 +4420,7 @@ mod tests {
             activity_type: "BUY".to_string(),
             subtype: None,
             activity_date: "2024-01-15".to_string(),
+            settlement_date: None,
             quantity: Some(dec!(1)),
             unit_price: Some(dec!(500)),
             currency: "USD".to_string(),
@@ -4388,6 +4473,7 @@ mod tests {
             activity_type: "INTEREST".to_string(),
             subtype: Some("STAKING_REWARD".to_string()),
             activity_date: "2024-01-15".to_string(),
+            settlement_date: None,
             quantity: Some(dec!(0.25)),
             unit_price: Some(dec!(4000)),
             currency: "CAD".to_string(),
@@ -4451,6 +4537,7 @@ mod tests {
                 activity_type: "INTEREST".to_string(),
                 subtype: Some("staking_reward".to_string()),
                 activity_date: "2024-01-15".to_string(),
+                settlement_date: None,
                 quantity: Some(dec!(0.25)),
                 unit_price: Some(dec!(4000)),
                 currency: "USD".to_string(),
@@ -4510,6 +4597,7 @@ mod tests {
                 activity_type: "INTEREST".to_string(),
                 subtype: Some("STAKING_REWARD".to_string()),
                 activity_date: "2024-01-15".to_string(),
+                settlement_date: None,
                 quantity: Some(dec!(-0.25)),
                 unit_price: Some(dec!(-4000)),
                 currency: "USD".to_string(),
@@ -4566,6 +4654,7 @@ mod tests {
                     activity_type: "BUY".to_string(),
                     subtype: Some("BUY_TO_OPEN".to_string()),
                     activity_date: "2024-01-15".to_string(),
+                    settlement_date: None,
                     quantity: Some(dec!(1)),
                     unit_price: Some(dec!(100)),
                     currency: "USD".to_string(),
@@ -4627,6 +4716,7 @@ mod tests {
                     activity_type: "BUY".to_string(),
                     subtype: None,
                     activity_date: "2024-01-15".to_string(),
+                    settlement_date: None,
                     quantity: Some(dec!(10)),
                     unit_price: Some(dec!(14082)),
                     currency: "GBp".to_string(),
@@ -4687,6 +4777,7 @@ mod tests {
                     activity_type: "INTEREST".to_string(),
                     subtype: Some("STAKING_REWARD".to_string()),
                     activity_date: "2024-01-15".to_string(),
+                    settlement_date: None,
                     quantity: None,
                     unit_price: None,
                     currency: "USD".to_string(),
@@ -4750,6 +4841,7 @@ mod tests {
                     activity_type: "INTEREST".to_string(),
                     subtype: Some("STAKING_REWARD".to_string()),
                     activity_date: "2024-01-15".to_string(),
+                    settlement_date: None,
                     quantity: Some(dec!(2)),
                     unit_price: Some(dec!(12.50)),
                     currency: "USD".to_string(),
@@ -4809,6 +4901,7 @@ mod tests {
                     activity_type: "INTEREST".to_string(),
                     subtype: Some("DRIP".to_string()),
                     activity_date: "2024-01-15".to_string(),
+                    settlement_date: None,
                     quantity: None,
                     unit_price: None,
                     currency: "USD".to_string(),
@@ -4865,6 +4958,7 @@ mod tests {
                     activity_type: "CREDIT".to_string(),
                     subtype: Some("STAKING_REWARD".to_string()),
                     activity_date: "2024-01-15".to_string(),
+                    settlement_date: None,
                     quantity: None,
                     unit_price: None,
                     currency: "USD".to_string(),
@@ -4930,6 +5024,7 @@ mod tests {
                 activity_type: "BUY".to_string(),
                 subtype: None,
                 activity_date: "2024-01-15".to_string(),
+                settlement_date: None,
                 quantity: Some(dec!(1)),
                 unit_price: Some(dec!(100)),
                 currency: "USD".to_string(),
@@ -5008,6 +5103,7 @@ mod tests {
             activity_type: "BUY".to_string(),
             subtype: None,
             activity_date: "2024-01-15".to_string(),
+            settlement_date: None,
             quantity: Some(dec!(10)),
             unit_price: Some(dec!(150)),
             currency: "USD".to_string(),
@@ -5181,6 +5277,7 @@ mod tests {
             activity_type: "BUY".to_string(),
             subtype: None,
             activity_date: "2024-01-15".to_string(),
+            settlement_date: None,
             quantity: Some(dec!(1)),
             unit_price: Some(dec!(100)),
             currency: "USD".to_string(),
@@ -5250,6 +5347,7 @@ mod tests {
             activity_type: "BUY".to_string(),
             subtype: None,
             activity_date: "2024-01-15".to_string(),
+            settlement_date: None,
             quantity: Some(dec!(1)),
             unit_price: Some(dec!(100)),
             currency: "USD".to_string(),
@@ -5312,6 +5410,7 @@ mod tests {
             activity_type: "BUY".to_string(),
             subtype: None,
             activity_date: "2024-01-15".to_string(),
+            settlement_date: None,
             quantity: Some(dec!(1)),
             unit_price: Some(dec!(100)),
             currency: "USD".to_string(),
@@ -5369,6 +5468,7 @@ mod tests {
             activity_type: "DEPOSIT".to_string(),
             subtype: None,
             activity_date: "2024-01-15".to_string(),
+            settlement_date: None,
             quantity: None,
             unit_price: None,
             currency: "USD".to_string(),
@@ -5424,6 +5524,7 @@ mod tests {
             activity_type: "WITHDRAWAL".to_string(),
             subtype: None,
             activity_date: "2024-01-15".to_string(),
+            settlement_date: None,
             quantity: None,
             unit_price: None,
             currency: "USD".to_string(),
@@ -5479,6 +5580,7 @@ mod tests {
             activity_type: "BUY".to_string(),
             subtype: None,
             activity_date: "2024-01-15".to_string(),
+            settlement_date: None,
             quantity: Some(dec!(10)),
             unit_price: Some(dec!(150)),
             currency: "USD".to_string(),
@@ -5544,6 +5646,7 @@ mod tests {
             activity_type: "BUY".to_string(),
             subtype: None,
             activity_date: "2024-01-15".to_string(),
+            settlement_date: None,
             quantity: Some(dec!(1)),
             unit_price: Some(dec!(50000)),
             currency: "USD".to_string(),
@@ -5613,6 +5716,7 @@ mod tests {
             activity_type: "BUY".to_string(),
             subtype: None,
             activity_date: "2024-01-15".to_string(),
+            settlement_date: None,
             quantity: Some(dec!(1)),
             unit_price: Some(dec!(50000)),
             currency: "USD".to_string(),
@@ -5685,6 +5789,7 @@ mod tests {
             activity_type: "BUY".to_string(),
             subtype: None,
             activity_date: "2024-01-15".to_string(),
+            settlement_date: None,
             quantity: Some(dec!(100)),
             unit_price: Some(dec!(50)),
             currency: "USD".to_string(),
@@ -5755,6 +5860,7 @@ mod tests {
             activity_type: "BUY".to_string(),
             subtype: None,
             activity_date: "2024-01-15".to_string(),
+            settlement_date: None,
             quantity: Some(dec!(100)),
             unit_price: Some(dec!(30)),
             currency: "CAD".to_string(),
@@ -5822,6 +5928,7 @@ mod tests {
                 activity_type: activity_type.to_string(),
                 subtype: None,
                 activity_date: "2024-01-15".to_string(),
+                settlement_date: None,
                 quantity: None,
                 unit_price: None,
                 currency: "USD".to_string(),
@@ -5895,6 +6002,7 @@ mod tests {
                 activity_type: "BUY".to_string(),
                 subtype: None,
                 activity_date: "2024-01-15".to_string(),
+                settlement_date: None,
                 quantity: Some(dec!(10)),
                 unit_price: Some(dec!(100)),
                 currency: "USD".to_string(), // Same as account, different from asset
@@ -10623,6 +10731,7 @@ mod tests {
                     activity_type: "DEPOSIT".to_string(),
                     subtype: None,
                     activity_date: new_date.to_rfc3339(),
+                    settlement_date: None,
                     quantity: Some(None),
                     unit_price: Some(None),
                     currency: "USD".to_string(),
@@ -11224,6 +11333,7 @@ mod tests {
             activity_type: "BUY".to_string(),
             subtype: None,
             activity_date: "2024-01-15".to_string(),
+            settlement_date: None,
             quantity: Some(dec!(10)),
             unit_price: Some(dec!(14082)), // 14082 pence
             currency: "GBp".to_string(),   // Pence currency
@@ -11315,6 +11425,7 @@ mod tests {
             activity_type: "BUY".to_string(),
             subtype: None,
             activity_date: "2024-01-15".to_string(),
+            settlement_date: None,
             quantity: Some(dec!(100)),
             unit_price: Some(dec!(7500)), // 7500 pence
             currency: "GBX".to_string(),  // Alternative pence code
@@ -11379,6 +11490,7 @@ mod tests {
             activity_type: "BUY".to_string(),
             subtype: None,
             activity_date: "2024-01-15".to_string(),
+            settlement_date: None,
             quantity: Some(dec!(50)),
             unit_price: Some(dec!(200000)), // 200000 cents = 2000 ZAR
             currency: "ZAc".to_string(),
@@ -11443,6 +11555,7 @@ mod tests {
             activity_type: "BUY".to_string(),
             subtype: None,
             activity_date: "2024-01-15".to_string(),
+            settlement_date: None,
             quantity: Some(dec!(1000)),
             unit_price: Some(dec!(0.45)), // Already in GBP
             currency: "GBP".to_string(),  // Major currency
@@ -12047,6 +12160,7 @@ mod tests {
             activity_type: "BUY".to_string(),
             subtype: None,
             activity_date: "2024-01-15".to_string(),
+            settlement_date: None,
             quantity: Some(dec!(2)),
             unit_price: Some(dec!(5)),
             currency: "USD".to_string(),
@@ -12174,6 +12288,7 @@ mod tests {
             activity_type: "TRANSFER_OUT".to_string(),
             subtype: None,
             activity_date: date_updated.to_rfc3339(),
+            settlement_date: None,
             quantity: None,
             unit_price: None,
             currency: "USD".to_string(),

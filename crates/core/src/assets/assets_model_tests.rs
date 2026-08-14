@@ -246,11 +246,16 @@ mod tests {
             metadata: Some(json!({ "contractMultiplier": "50" })),
             ..Default::default()
         };
+        let bond = Asset {
+            instrument_type: Some(InstrumentType::Bond),
+            ..Default::default()
+        };
 
         assert_eq!(equity.contract_multiplier(), dec!(1));
         assert_eq!(bare_option.contract_multiplier(), dec!(100));
         assert_eq!(mini_option.contract_multiplier(), dec!(10));
         assert_eq!(future.contract_multiplier(), dec!(50));
+        assert_eq!(bond.contract_multiplier(), dec!(0.01));
     }
 
     // Test InstrumentType

@@ -799,6 +799,7 @@ where
                     asset_id: Some(asset.id.clone()),
                     activity_type: "SPLIT".to_string(),
                     activity_date: split.date.to_string(),
+                    settlement_date: None,
                     amount: Some(split.ratio),
                     currency: currency.to_string(),
                     idempotency_key: Some(key),
