@@ -15,13 +15,16 @@ use crate::accounts::{
     account_types, is_liability_account_type, Account, AccountServiceTrait, TrackingMode,
 };
 use crate::activities::{
-    Activity, ActivityServiceTrait, TransferPairResolution, ACTIVITY_TYPE_BUY,
-    ACTIVITY_TYPE_TRANSFER_IN,
+    Activity, ActivityServiceTrait, NewActivity, TransferPairResolution, ACTIVITY_TYPE_BUY,
+    ACTIVITY_TYPE_CREDIT, ACTIVITY_TYPE_DEPOSIT, ACTIVITY_TYPE_DIVIDEND, ACTIVITY_TYPE_FEE,
+    ACTIVITY_TYPE_INTEREST, ACTIVITY_TYPE_SELL, ACTIVITY_TYPE_TAX, ACTIVITY_TYPE_TRANSFER_IN,
+    ACTIVITY_TYPE_TRANSFER_OUT, ACTIVITY_TYPE_WITHDRAWAL,
 };
 use crate::assets::{Asset, AssetKind, AssetServiceTrait, QuoteMode};
 use crate::errors::Result;
+use crate::fx::currency::currency_rounding_tolerance;
 use crate::lots::LotRepositoryTrait;
-use crate::portfolio::economic_events::BasisStatus;
+use crate::portfolio::economic_events::{ActivityEconomicsResolver, BasisStatus};
 use crate::portfolio::holdings::{HoldingType, HoldingsServiceTrait};
 use crate::portfolio::performance::is_external_transfer;
 use crate::portfolio::snapshot::holdings_calculator::economics::{
@@ -37,7 +40,8 @@ use crate::taxonomies::TaxonomyServiceTrait;
 use crate::utils::time_utils::{activity_date_in_tz, parse_user_timezone_or_default, user_today};
 
 use super::checks::{
-    AccountConfigurationCheck, AssetHoldingInfo, ClassificationCheck, ConsistencyIssueInfo,
+    AccountConfigurationCheck, ActivityCashIntegrityCheck, ActivityCashIssueInfo,
+    ActivityCashIssueKind, AssetHoldingInfo, ClassificationCheck, ConsistencyIssueInfo,
     DataConsistencyCheck, FxIntegrityCheck, FxPairInfo, InvalidTransferGroupInfo,
     LegacyMigrationInfo, PriceStalenessCheck, QuoteSyncCheck, QuoteSyncErrorInfo,
     TransferIntegrityCheck, TransferLegDetail, UnclassifiedAssetInfo, UnconfiguredAccountInfo,
@@ -72,6 +76,7 @@ pub struct HealthService {
     consistency_check: DataConsistencyCheck,
     account_config_check: AccountConfigurationCheck,
     transfer_integrity_check: TransferIntegrityCheck,
+    activity_cash_integrity_check: ActivityCashIntegrityCheck,
 }
 
 fn is_price_staleness_candidate(
@@ -95,6 +100,7 @@ impl HealthService {
             consistency_check: DataConsistencyCheck::new(),
             account_config_check: AccountConfigurationCheck::new(),
             transfer_integrity_check: TransferIntegrityCheck::new(),
+            activity_cash_integrity_check: ActivityCashIntegrityCheck::new(),
         }
     }
 
@@ -114,6 +120,7 @@ impl HealthService {
             consistency_check: DataConsistencyCheck::new(),
             account_config_check: AccountConfigurationCheck::new(),
             transfer_integrity_check: TransferIntegrityCheck::new(),
+            activity_cash_integrity_check: ActivityCashIntegrityCheck::new(),
         }
     }
 
@@ -137,6 +144,7 @@ impl HealthService {
         configured_timezone: Option<&str>,
         client_timezone: Option<&str>,
         invalid_transfer_groups: &[InvalidTransferGroupInfo],
+        activity_cash_issues: &[ActivityCashIssueInfo],
     ) -> Result<HealthStatus> {
         let config = self.config.read().await.clone();
         let ctx = HealthContext::new(config, base_currency, total_portfolio_value);
@@ -234,6 +242,15 @@ impl HealthService {
             transfer_issues.len()
         );
         all_issues.extend(transfer_issues);
+
+        let cash_issues = self
+            .activity_cash_integrity_check
+            .analyze(activity_cash_issues, &ctx);
+        debug!(
+            "Activity cash integrity check found {} issues",
+            cash_issues.len()
+        );
+        all_issues.extend(cash_issues);
 
         // Filter out dismissed issues (unless data has changed)
         let filtered_issues = self.filter_dismissed_issues(all_issues).await?;
@@ -578,6 +595,13 @@ impl HealthService {
             &account_name_map,
             effective_timezone,
         );
+        let activity_cash_issues = gather_activity_cash_issues(
+            &health_activities,
+            &account_name_map,
+            asset_service.as_ref(),
+            effective_timezone,
+        )
+        .await;
         let valuation_quality_issues = gather_valuation_quality_issues(
             valuation_service.as_ref(),
             snapshot_service.as_ref(),
@@ -627,6 +651,7 @@ impl HealthService {
             configured_timezone,
             client_timezone,
             &invalid_transfer_groups,
+            &activity_cash_issues,
         )
         .await
     }
@@ -754,6 +779,122 @@ fn gather_invalid_activity_date_issues(
                 snapshot_source: Some("ACCOUNT_ACTIVITY".to_string()),
                 snapshot_min_date: Some(min_date),
                 snapshot_max_date: Some(today),
+            })
+        })
+        .collect()
+}
+
+async fn gather_activity_cash_issues(
+    activities: &[Activity],
+    account_name_map: &HashMap<String, String>,
+    asset_service: &dyn AssetServiceTrait,
+    configured_timezone: Option<&str>,
+) -> Vec<ActivityCashIssueInfo> {
+    let asset_ids: Vec<String> = activities
+        .iter()
+        .filter_map(|activity| activity.asset_id.clone())
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect();
+    let assets_by_id: HashMap<String, Asset> = asset_service
+        .get_assets_by_asset_ids(&asset_ids)
+        .await
+        .unwrap_or_else(|error| {
+            warn!("Failed to load assets for activity cash checks: {}", error);
+            Vec::new()
+        })
+        .into_iter()
+        .map(|asset| (asset.id.clone(), asset))
+        .collect();
+    let timezone = parse_user_timezone_or_default(configured_timezone.unwrap_or_default());
+
+    activities
+        .iter()
+        .filter(|activity| activity.is_posted())
+        .filter_map(|activity| {
+            let activity_type = activity.effective_type();
+            let is_cash_impacting = matches!(
+                activity_type,
+                ACTIVITY_TYPE_BUY
+                    | ACTIVITY_TYPE_SELL
+                    | ACTIVITY_TYPE_DEPOSIT
+                    | ACTIVITY_TYPE_WITHDRAWAL
+                    | ACTIVITY_TYPE_DIVIDEND
+                    | ACTIVITY_TYPE_INTEREST
+                    | ACTIVITY_TYPE_CREDIT
+                    | ACTIVITY_TYPE_FEE
+                    | ACTIVITY_TYPE_TAX
+                    | ACTIVITY_TYPE_TRANSFER_IN
+                    | ACTIVITY_TYPE_TRANSFER_OUT
+            );
+            if !is_cash_impacting || ActivityEconomicsResolver::is_security_transfer(activity) {
+                return None;
+            }
+
+            let asset_multiplier = activity
+                .asset_id
+                .as_ref()
+                .and_then(|asset_id| assets_by_id.get(asset_id))
+                .map(Asset::contract_multiplier)
+                .unwrap_or(Decimal::ONE);
+            let multiplier = activity
+                .metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("contract_multiplier"))
+                .and_then(|value| {
+                    value
+                        .as_f64()
+                        .and_then(Decimal::from_f64_retain)
+                        .or_else(|| value.as_str().and_then(|raw| raw.parse::<Decimal>().ok()))
+                })
+                .filter(|value| *value > Decimal::ZERO)
+                .unwrap_or(asset_multiplier);
+            let resolved = ActivityEconomicsResolver::resolve_cash(activity, multiplier);
+            let checks_expected_cash =
+                matches!(activity_type, ACTIVITY_TYPE_BUY | ACTIVITY_TYPE_SELL)
+                    || NewActivity::is_asset_backed_income_subtype(
+                        activity_type,
+                        activity.subtype.as_deref(),
+                    );
+            let kind = if checks_expected_cash {
+                match (activity.amount, resolved.expected_amount) {
+                    (Some(trusted), Some(expected))
+                        if (trusted.abs() - expected).abs()
+                            > currency_rounding_tolerance(&activity.currency) =>
+                    {
+                        ActivityCashIssueKind::Mismatch
+                    }
+                    _ if resolved.amount.is_none_or(|amount| amount <= Decimal::ZERO) => {
+                        ActivityCashIssueKind::Missing
+                    }
+                    _ => return None,
+                }
+            } else if resolved.amount.is_none_or(|amount| amount <= Decimal::ZERO) {
+                ActivityCashIssueKind::Missing
+            } else {
+                return None;
+            };
+            let trusted_amount = activity.amount.map(|amount| amount.abs());
+
+            Some(ActivityCashIssueInfo {
+                kind,
+                activity_id: activity.id.clone(),
+                account_name: account_name_map
+                    .get(&activity.account_id)
+                    .cloned()
+                    .unwrap_or_else(|| activity.account_id.clone()),
+                activity_type: activity_type.to_string(),
+                date: activity_date_in_tz(activity.activity_date, timezone),
+                currency: activity.currency.clone(),
+                trusted_amount,
+                expected_amount: resolved.expected_amount,
+                difference: trusted_amount
+                    .zip(resolved.expected_amount)
+                    .map(|(trusted, expected)| trusted - expected),
+                quantity: activity.quantity.map(|quantity| quantity.abs()),
+                unit_price: activity.unit_price.map(|price| price.abs()),
+                fee: activity.fee_amt(),
+                tax: activity.tax_amt(),
             })
         })
         .collect()
@@ -1853,6 +1994,7 @@ impl HealthServiceTrait for HealthService {
         configured_timezone: Option<&str>,
         client_timezone: Option<&str>,
         invalid_transfer_groups: &[InvalidTransferGroupInfo],
+        activity_cash_issues: &[ActivityCashIssueInfo],
     ) -> Result<HealthStatus> {
         // Call the inherent method
         HealthService::run_checks_with_data(
@@ -1870,6 +2012,7 @@ impl HealthServiceTrait for HealthService {
             configured_timezone,
             client_timezone,
             invalid_transfer_groups,
+            activity_cash_issues,
         )
         .await
     }
@@ -3034,11 +3177,12 @@ mod tests {
 
         assert_eq!(
             health_sell_net_proceeds(&option_sell, Some(&option_asset)),
-            dec!(299.75)
+            dec!(999)
         );
 
         let mut bond_sell = option_sell.clone();
         bond_sell.id = "sell-bond".to_string();
+        bond_sell.quantity = Some(dec!(200));
         bond_sell.amount = Some(dec!(950));
 
         let mut bond_asset = health_asset("bond");
@@ -3046,12 +3190,10 @@ mod tests {
 
         assert_eq!(
             health_sell_net_proceeds(&bond_sell, Some(&bond_asset)),
-            dec!(949.75)
+            dec!(950)
         );
 
-        // Without a booked amount the calculator falls back to qty * price
-        // (has_amount gate in should_use_activity_amount), so the health
-        // check must too — not amt() == 0.
+        // Without a trusted amount, derive the final cash amount from details.
         let mut bond_sell_no_amount = bond_sell.clone();
         bond_sell_no_amount.id = "sell-bond-no-amount".to_string();
         bond_sell_no_amount.amount = None;
@@ -3092,6 +3234,7 @@ mod tests {
                 &[],
                 Some("UTC"),
                 None,
+                &[],
                 &[],
             )
             .await
@@ -3171,6 +3314,7 @@ mod tests {
                 Some("UTC"),
                 None,
                 &[],
+                &[],
             )
             .await
             .unwrap();
@@ -3210,6 +3354,7 @@ mod tests {
                 Some("UTC"),
                 None,
                 &[],
+                &[],
             )
             .await
             .unwrap();
@@ -3238,6 +3383,7 @@ mod tests {
                 &[],
                 Some("UTC"),
                 None,
+                &[],
                 &[],
             )
             .await

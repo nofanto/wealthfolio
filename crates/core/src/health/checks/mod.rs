@@ -9,6 +9,7 @@
 //! - Account configuration check
 
 pub mod account_configuration;
+pub mod activity_cash_integrity;
 pub mod classification;
 pub mod data_consistency;
 pub mod fx_integrity;
@@ -18,6 +19,7 @@ pub mod transfer_integrity;
 
 // Re-export check implementations
 pub use account_configuration::AccountConfigurationCheck;
+pub use activity_cash_integrity::ActivityCashIntegrityCheck;
 pub use classification::ClassificationCheck;
 pub use data_consistency::DataConsistencyCheck;
 pub use fx_integrity::FxIntegrityCheck;
@@ -27,6 +29,7 @@ pub use transfer_integrity::TransferIntegrityCheck;
 
 // Re-export data types used by checks
 pub use account_configuration::UnconfiguredAccountInfo;
+pub use activity_cash_integrity::{ActivityCashIssueInfo, ActivityCashIssueKind};
 pub use classification::{LegacyMigrationInfo, UnclassifiedAssetInfo};
 pub use data_consistency::{ConsistencyIssueInfo, ConsistencyIssueType, ValuationIssueReason};
 pub use fx_integrity::FxPairInfo;

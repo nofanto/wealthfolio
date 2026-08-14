@@ -29,9 +29,9 @@ use wealthfolio_core::{
     },
     health::{
         checks::{
-            AssetHoldingInfo, ConsistencyIssueInfo, FxPairInfo, InvalidTransferGroupInfo,
-            LegacyMigrationInfo, QuoteSyncErrorInfo, UnclassifiedAssetInfo,
-            UnconfiguredAccountInfo,
+            ActivityCashIssueInfo, AssetHoldingInfo, ConsistencyIssueInfo, FxPairInfo,
+            InvalidTransferGroupInfo, LegacyMigrationInfo, QuoteSyncErrorInfo,
+            UnclassifiedAssetInfo, UnconfiguredAccountInfo,
         },
         FixAction, HealthConfig, HealthServiceTrait, HealthStatus,
     },
@@ -649,6 +649,10 @@ impl ActivityServiceTrait for MockActivityService {
             symbol_mappings: std::collections::HashMap::new(),
             symbol_mapping_meta: std::collections::HashMap::new(),
         })
+    }
+
+    async fn migrate_activity_cash_amounts(&self) -> CoreResult<usize> {
+        Ok(0)
     }
 }
 
@@ -1753,6 +1757,7 @@ impl HealthServiceTrait for MockHealthService {
         _configured_timezone: Option<&str>,
         _client_timezone: Option<&str>,
         _invalid_transfer_groups: &[InvalidTransferGroupInfo],
+        _activity_cash_issues: &[ActivityCashIssueInfo],
     ) -> CoreResult<HealthStatus> {
         Ok(HealthStatus::healthy())
     }
