@@ -243,7 +243,15 @@ export function ActivityDetailSheet({ activity, open, onOpenChange }: ActivityDe
               />
             )}
             <DetailRow
-              label={isOption ? t("activity:detail.total_premium") : t("activity:field_amount")}
+              label={
+                activity.activityType === ActivityType.SPLIT
+                  ? t("activity:field_amount")
+                  : activity.activityType === ActivityType.BUY
+                    ? t("activity:form.total_debit")
+                    : activity.activityType === ActivityType.SELL
+                      ? t("activity:form.total_credit")
+                      : t("activity:form.label_amount")
+              }
               value={<AmountDisplay value={Number(activity.amount)} currency={activity.currency} />}
             />
             {Number(activity.fee) !== 0 && (

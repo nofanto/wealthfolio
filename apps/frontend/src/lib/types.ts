@@ -227,6 +227,8 @@ export interface ActivityDetails {
   /** Canonical exchange MIC code for asset identification */
   exchangeMic?: string;
   instrumentType?: string;
+  /** Canonical multiplier resolved from the linked asset. */
+  contractMultiplier?: string | number | null;
   // Sync/source metadata
   sourceSystem?: string;
   sourceRecordId?: string;
@@ -278,6 +280,7 @@ export interface ActivityCreate {
   activityType: string;
   subtype?: string | null; // Semantic variation (DRIP, STAKING_REWARD, etc.)
   activityDate: string | Date;
+  settlementDate?: string | Date | null;
   /** Optional grouping key (links paired transfer legs). */
   sourceGroupId?: string;
   asset?: AssetResolutionInput;
@@ -303,6 +306,7 @@ export interface ActivityUpdate {
   activityType: string;
   subtype?: string | null;
   activityDate: string | Date;
+  settlementDate?: string | Date | null;
   /** Optional grouping key (links paired transfer legs). */
   sourceGroupId?: string;
   asset?: AssetResolutionInput;

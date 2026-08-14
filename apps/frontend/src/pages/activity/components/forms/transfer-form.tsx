@@ -853,7 +853,9 @@ export function TransferForm({
                     name="sourceAmount"
                     render={({ field }) => (
                       <FormItem>
-                        <FormLabel>{t("activity:form.label_amount")}</FormLabel>
+                        <FormLabel>
+                          {t("activity:form.label_sent", { currency: effectiveSourceCurrency })}
+                        </FormLabel>
                         <FormControl>
                           <MoneyInput
                             ref={field.ref}
@@ -861,7 +863,7 @@ export function TransferForm({
                             value={field.value}
                             onValueChange={handleSourceAmountChange}
                             placeholder="0.00"
-                            aria-label={t("activity:form.label_amount")}
+                            aria-label={t("activity:form.sent_amount")}
                             data-testid="input-amount"
                           />
                         </FormControl>
@@ -908,7 +910,16 @@ export function TransferForm({
             ) : (
               <AmountInput
                 name="amount"
-                label={t("activity:form.label_amount")}
+                label={
+                  direction === "in"
+                    ? t("activity:form.total_credit")
+                    : t("activity:form.total_debit")
+                }
+                labelHelpText={
+                  direction === "in"
+                    ? t("activity:form.help_total_credit")
+                    : t("activity:form.help_total_debit")
+                }
                 currency={currency}
               />
             ))}

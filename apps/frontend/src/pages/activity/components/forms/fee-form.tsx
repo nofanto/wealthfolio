@@ -121,7 +121,7 @@ export function FeeForm({
         </FormSection>
 
         <FormSection title={t("activity:form.section_amount")}>
-          <AmountInput name="amount" label={t("activity:form.label_amount")} currency={currency} />
+          <AmountInput name="amount" label={t("activity:field_fee_amount")} currency={currency} />
         </FormSection>
 
         {/* Advanced options (currency, subtype) and notes, collapsed by default */}

@@ -3,12 +3,23 @@ import {
   isAssetIdentityRequired,
   isCashActivity,
   isCashTransfer,
+  getContractMultiplier,
   isIncomeActivity,
+  isSecuritiesTransfer,
+  resolveActivityCash,
 } from "@/lib/activity-utils";
 import { buildAssetResolutionInput, normalizeOptionalString } from "@/lib/asset-resolution-input";
-import { ActivityType, SUBTYPES_BY_ACTIVITY_TYPE } from "@/lib/constants";
+import {
+  ActivityType,
+  DECIMAL_PRECISION,
+  SUBTYPES_BY_ACTIVITY_TYPE,
+} from "@/lib/constants";
 import type { Account } from "@/lib/types";
-import { normalizeDecimalString, parseLocalDateTime, toPayloadNumber } from "@/lib/utils";
+import {
+  normalizeDecimalString,
+  parseLocalDateTime,
+  roundDecimal,
+} from "@/lib/utils";
 import type {
   ActivityCreatePayload,
   ActivityUpdatePayload,
@@ -146,6 +157,7 @@ export function createDraftTransaction(
     quantity: null,
     unitPrice: null,
     amount: null,
+    amountMode: "calculated",
     fee: null,
     tax: null,
     currency: defaultAccount?.currency ?? fallbackCurrency,
@@ -208,19 +220,32 @@ function applySplitDefaults(transaction: LocalTransaction): LocalTransaction {
   };
 }
 
-function getAssetBackedAmount(
-  quantity: string | null | undefined,
-  unitPrice: string | null | undefined,
-): string | null {
-  const q = quantity != null ? Number.parseFloat(quantity) : NaN;
-  const p = unitPrice != null ? Number.parseFloat(unitPrice) : NaN;
-
-  if (!(q > 0) || !(p > 0)) {
-    return null;
+export function applyCalculatedTradeTotal(transaction: LocalTransaction): LocalTransaction {
+  const isTrade =
+    transaction.activityType === ActivityType.BUY || transaction.activityType === ActivityType.SELL;
+  const isAssetBackedIncome = isAssetBackedIncomeSubtype(
+    transaction.activityType,
+    transaction.subtype,
+  );
+  if ((!isTrade && !isAssetBackedIncome) || transaction.amountMode !== "calculated") {
+    return transaction;
   }
 
-  const rounded = toPayloadNumber(q * p);
-  return rounded === undefined ? null : normalizeDecimalString(rounded);
+  const quantity = transaction.quantity != null ? Number(transaction.quantity) : NaN;
+  const unitPrice = transaction.unitPrice != null ? Number(transaction.unitPrice) : NaN;
+  if (!(quantity > 0) || !(unitPrice > 0)) {
+    return { ...transaction, amount: null };
+  }
+
+  const gross = quantity * unitPrice * getContractMultiplier(transaction);
+  const charges = Number(transaction.fee || 0) + Number(transaction.tax || 0);
+  const total = transaction.activityType === ActivityType.BUY ? gross + charges : gross - charges;
+  const rounded = total > 0 ? roundDecimal(total, DECIMAL_PRECISION) : undefined;
+
+  return {
+    ...transaction,
+    amount: rounded === undefined ? null : (normalizeDecimalString(rounded) ?? null),
+  };
 }
 
 /**
@@ -233,6 +258,7 @@ export function applyTransactionUpdate(params: TransactionUpdateParams): LocalTr
     value,
     accountLookup,
     assetCurrencyLookup,
+    assetMultiplierLookup,
     fallbackCurrency,
     resolveTransactionCurrency,
   } = params;
@@ -252,16 +278,6 @@ export function applyTransactionUpdate(params: TransactionUpdateParams): LocalTr
   } else if (field === "quantity") {
     const newQty = normalizedDecimalOrNull(value);
     updated = { ...updated, quantity: newQty };
-    if (
-      isAssetBackedIncomeSubtype(updated.activityType, updated.subtype) &&
-      newQty != null &&
-      updated.unitPrice != null
-    ) {
-      const computedAmount = getAssetBackedAmount(newQty, updated.unitPrice);
-      if (computedAmount != null) {
-        updated = { ...updated, amount: computedAmount };
-      }
-    }
     updated = applySplitDefaults(updated);
   } else if (field === "unitPrice") {
     const newUnitPrice = normalizedDecimalOrNull(value);
@@ -269,23 +285,21 @@ export function applyTransactionUpdate(params: TransactionUpdateParams): LocalTr
     if (
       newUnitPrice != null &&
       (isAlwaysCashActivity(updated.activityType, updated.subtype) ||
-        isIncomeActivity(updated.activityType))
+        (isIncomeActivity(updated.activityType) &&
+          !isAssetBackedIncomeSubtype(updated.activityType, updated.subtype)))
     ) {
-      if (isAssetBackedIncomeSubtype(updated.activityType, updated.subtype)) {
-        const computedAmount = getAssetBackedAmount(updated.quantity, newUnitPrice);
-        if (computedAmount != null) {
-          updated = { ...updated, amount: computedAmount };
-        }
-      } else {
-        updated = { ...updated, amount: newUnitPrice };
-      }
+      updated = { ...updated, amount: newUnitPrice };
     }
     updated = applySplitDefaults(updated);
   } else if (field === "amount") {
     if (value == null || value === "") {
-      updated = { ...updated, amount: null };
+      updated = { ...updated, amount: null, amountMode: "calculated" };
     } else {
-      updated = { ...updated, amount: normalizeDecimalString(value) ?? null };
+      updated = {
+        ...updated,
+        amount: normalizeDecimalString(value) ?? null,
+        amountMode: "custom",
+      };
     }
   } else if (field === "fee") {
     updated = { ...updated, fee: normalizedDecimalOrNull(value) };
@@ -296,7 +310,12 @@ export function applyTransactionUpdate(params: TransactionUpdateParams): LocalTr
     // Only update assetSymbol, NOT assetId
     // For new activities, backend generates canonical assetId from symbol + exchangeMic
     // For existing activities, assetId is preserved from the original data
-    updated = { ...updated, assetSymbol: upper };
+    updated = {
+      ...updated,
+      assetSymbol: upper,
+      contractMultiplier:
+        assetMultiplierLookup?.get(upper) ?? updated.contractMultiplier,
+    };
 
     // Auto-fill currency only if not already set (e.g., by handleSymbolSelect
     // which sets the correct currency from search result / quote resolution).
@@ -316,12 +335,23 @@ export function applyTransactionUpdate(params: TransactionUpdateParams): LocalTr
     }
   } else if (field === "activityType") {
     const nextActivityType = value as ActivityType;
+    const wasCalculatedAmountType =
+      updated.activityType === ActivityType.BUY ||
+      updated.activityType === ActivityType.SELL ||
+      isAssetBackedIncomeSubtype(updated.activityType, updated.subtype);
     const wasAssetBacked = isAssetBackedIncomeSubtype(updated.activityType, updated.subtype);
     const nextSubtype = isSubtypeAllowedForActivityType(nextActivityType, updated.subtype)
       ? updated.subtype
       : undefined;
 
     updated = { ...updated, activityType: nextActivityType, subtype: nextSubtype };
+    const isCalculatedAmountType =
+      nextActivityType === ActivityType.BUY ||
+      nextActivityType === ActivityType.SELL ||
+      isAssetBackedIncomeSubtype(nextActivityType, nextSubtype);
+    if (updated.amountMode === "calculated" && wasCalculatedAmountType && !isCalculatedAmountType) {
+      updated = { ...updated, amount: null };
+    }
     if (wasAssetBacked && !isAssetBackedIncomeSubtype(nextActivityType, nextSubtype)) {
       updated = { ...updated, quantity: null, unitPrice: null };
     }
@@ -358,16 +388,15 @@ export function applyTransactionUpdate(params: TransactionUpdateParams): LocalTr
       updated = { ...updated, assetSymbol: "", assetId: "" };
     }
     if (
-      isAssetBackedIncomeSubtype(updated.activityType, newSubtype) &&
-      updated.quantity != null &&
-      updated.unitPrice != null
+      !isAssetBackedIncomeSubtype(updated.activityType, newSubtype) &&
+      wasAssetBacked
     ) {
-      const computedAmount = getAssetBackedAmount(updated.quantity, updated.unitPrice);
-      if (computedAmount != null) {
-        updated = { ...updated, amount: computedAmount };
-      }
-    } else if (wasAssetBacked) {
-      updated = { ...updated, quantity: null, unitPrice: null };
+      updated = {
+        ...updated,
+        quantity: null,
+        unitPrice: null,
+        amount: updated.amountMode === "calculated" ? null : updated.amount,
+      };
     }
     updated = applyCashDefaults(updated, resolveTransactionCurrency, fallbackCurrency);
   } else if (field === "isExternal") {
@@ -379,6 +408,7 @@ export function applyTransactionUpdate(params: TransactionUpdateParams): LocalTr
     updated = { ...updated, instrumentType, pendingInstrumentType: instrumentType };
   }
 
+  updated = applyCalculatedTradeTotal(updated);
   return { ...updated, updatedAt: new Date() };
 }
 
@@ -739,7 +769,21 @@ function validateTransaction(transaction: LocalTransaction): TransactionValidati
     }
   }
 
-  // Validate non-negative values for certain fields
+  // Stored numeric magnitudes are unsigned; activity type controls direction.
+  for (const [field, value, label] of [
+    ["quantity", transaction.quantity, "Quantity"],
+    ["unitPrice", transaction.unitPrice, "Price"],
+    ["amount", transaction.amount, "Amount"],
+  ] as const) {
+    if (value != null && Number.parseFloat(value) < 0) {
+      errors.push({
+        transactionId: transaction.id,
+        field,
+        message: `${label} cannot be negative`,
+      });
+    }
+  }
+
   if (transaction.fee != null && parseFloat(transaction.fee) < 0) {
     errors.push({
       transactionId: transaction.id,
@@ -761,6 +805,58 @@ function validateTransaction(transaction: LocalTransaction): TransactionValidati
       transactionId: transaction.id,
       field: "fxRate",
       message: "FX rate cannot be negative",
+    });
+  }
+
+  const cashImpactingTypes: readonly string[] = [
+    ActivityType.BUY,
+    ActivityType.SELL,
+    ActivityType.DEPOSIT,
+    ActivityType.WITHDRAWAL,
+    ActivityType.DIVIDEND,
+    ActivityType.INTEREST,
+    ActivityType.CREDIT,
+    ActivityType.FEE,
+    ActivityType.TAX,
+    ActivityType.TRANSFER_IN,
+    ActivityType.TRANSFER_OUT,
+  ];
+  const isCashImpacting = cashImpactingTypes.includes(transaction.activityType);
+  const isSecurityTransfer = isSecuritiesTransfer(
+    transaction.activityType,
+    transaction.assetSymbol,
+    transaction.assetId,
+  );
+  const resolvedCashAmount =
+    isCashImpacting && !isSecurityTransfer ? resolveActivityCash(transaction).amount : null;
+  if (
+    isCashImpacting &&
+    !isSecurityTransfer &&
+    (resolvedCashAmount == null || resolvedCashAmount <= 0)
+  ) {
+    errors.push({
+      transactionId: transaction.id,
+      field: "amount",
+      message: "A positive total is required or must be derivable",
+    });
+  }
+
+  const amount = transaction.amount == null ? NaN : Number.parseFloat(transaction.amount);
+  const charges = Number(transaction.fee || 0) + Number(transaction.tax || 0);
+  const isCashOutflowWithGross =
+    transaction.activityType === ActivityType.BUY ||
+    transaction.activityType === ActivityType.WITHDRAWAL ||
+    (transaction.activityType === ActivityType.TRANSFER_OUT &&
+      isCashTransfer(
+        transaction.activityType,
+        transaction.assetSymbol,
+        transaction.assetId,
+      ));
+  if (isCashOutflowWithGross && amount > 0 && amount <= charges) {
+    errors.push({
+      transactionId: transaction.id,
+      field: "amount",
+      message: "Total must be greater than fees and taxes",
     });
   }
 

@@ -15,6 +15,7 @@ import {
 } from "@wealthfolio/ui";
 import { useTranslation } from "react-i18next";
 import { useFormContext, type FieldPath, type FieldValues } from "react-hook-form";
+import { DECIMAL_PRECISION } from "@/lib/constants";
 
 interface AmountInputProps<TFieldValues extends FieldValues = FieldValues> {
   name: FieldPath<TFieldValues>;
@@ -22,7 +23,7 @@ interface AmountInputProps<TFieldValues extends FieldValues = FieldValues> {
   labelHelpText?: string;
   placeholder?: string;
   "data-testid"?: string;
-  /** Maximum decimal places (default: 2 for currency) */
+  /** Maximum decimal places (default: canonical storage precision) */
   maxDecimalPlaces?: number;
   /** Currency code to display as adornment (e.g., "USD") */
   currency?: string;
@@ -41,7 +42,7 @@ export function AmountInput<TFieldValues extends FieldValues = FieldValues>({
   labelHelpText,
   placeholder = "0.00",
   "data-testid": dataTestId,
-  maxDecimalPlaces = 2,
+  maxDecimalPlaces = DECIMAL_PRECISION,
   currency,
 }: AmountInputProps<TFieldValues>) {
   const { t } = useTranslation(["activity"]);

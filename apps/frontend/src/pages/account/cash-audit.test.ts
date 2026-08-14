@@ -161,7 +161,7 @@ function createActivity(overrides: Partial<ActivityDetails> = {}): ActivityDetai
     date: new Date("2026-03-09T12:00:00.000Z"),
     quantity: "0",
     unitPrice: "0",
-    amount: "0",
+    amount: null,
     fee: "0",
     currency: "USD",
     needsReview: false,

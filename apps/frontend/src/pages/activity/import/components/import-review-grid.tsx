@@ -385,7 +385,7 @@ function useImportReviewColumns({
         header: t("activity:import.columns.quantity"),
         size: 120,
         enableSorting: false,
-        meta: { cell: { variant: "number", step: 0.000001, valueType: "string" } },
+        meta: { cell: { variant: "number", min: 0, step: 0.000001, valueType: "string" } },
       },
       // 9. Price
       {
@@ -396,17 +396,20 @@ function useImportReviewColumns({
         enableSorting: false,
         meta: {
           helpText: t("activity:import.columns.unitPriceHelp"),
-          cell: { variant: "number", step: 0.000001, valueType: "string" },
+          cell: { variant: "number", min: 0, step: 0.000001, valueType: "string" },
         },
       },
       // 10. Amount
       {
         id: "amount",
         accessorKey: "amount",
-        header: t("activity:import.columns.amount"),
+        header: t("activity:datagrid.column.amount"),
         size: 120,
         enableSorting: false,
-        meta: { cell: { variant: "number", step: 0.000001, valueType: "string" } },
+        meta: {
+          helpText: t("activity:datagrid.amount_help"),
+          cell: { variant: "number", min: 0, step: 0.000001, valueType: "string" },
+        },
       },
       // 11. Currency
       {
@@ -424,7 +427,7 @@ function useImportReviewColumns({
         header: t("activity:import.columns.fee"),
         size: 100,
         enableSorting: false,
-        meta: { cell: { variant: "number", step: 0.000001, valueType: "string" } },
+        meta: { cell: { variant: "number", min: 0, step: 0.000001, valueType: "string" } },
       },
       // 13. Tax
       {
@@ -433,7 +436,7 @@ function useImportReviewColumns({
         header: t("activity:import.columns.tax"),
         size: 100,
         enableSorting: false,
-        meta: { cell: { variant: "number", step: 0.000001, valueType: "string" } },
+        meta: { cell: { variant: "number", min: 0, step: 0.000001, valueType: "string" } },
       },
       // 14. FX Rate
       {
@@ -442,7 +445,7 @@ function useImportReviewColumns({
         header: t("activity:import.columns.fxRate"),
         size: 100,
         enableSorting: false,
-        meta: { cell: { variant: "number", step: 0.000001, valueType: "string" } },
+        meta: { cell: { variant: "number", min: 0, step: 0.000001, valueType: "string" } },
       },
 
       // === Notes ===

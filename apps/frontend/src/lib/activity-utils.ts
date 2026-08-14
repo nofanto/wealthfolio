@@ -12,7 +12,7 @@ import {
   SUBTYPE_DISPLAY_NAMES,
   SYMBOL_REQUIRED_TYPES,
 } from "./constants";
-import { ActivityDetails } from "./types";
+import type { ActivityDetails, Asset } from "./types";
 
 /**
  * Localized display name for an activity type (e.g. BUY -> "Buy" / "买入").
@@ -352,12 +352,146 @@ export const getUnitPrice = (activity: ActivityDetails): number => {
  * @param activity The activity
  * @returns The contract multiplier
  */
-export const getContractMultiplier = (activity: ActivityDetails): number => {
+export const getContractMultiplier = (activity: Partial<ActivityDetails>): number => {
   const stored = Number(activity.metadata?.[METADATA_CONTRACT_MULTIPLIER]);
   if (Number.isFinite(stored) && stored > 0) {
     return stored;
   }
-  return activity.instrumentType === InstrumentType.OPTION ? 100 : 1;
+  const canonical = Number(activity.contractMultiplier);
+  if (Number.isFinite(canonical) && canonical > 0) {
+    return canonical;
+  }
+  if (activity.instrumentType === InstrumentType.OPTION) return 100;
+  if (activity.instrumentType === InstrumentType.BOND) return 0.01;
+  return 1;
+};
+
+/** Resolve the same canonical multiplier the backend derives from Asset metadata. */
+export const getAssetContractMultiplier = (
+  asset: Pick<Asset, "instrumentType" | "metadata">,
+): number => {
+  const option = asset.metadata?.option as { multiplier?: unknown } | undefined;
+  const optionMultiplier = Number(option?.multiplier);
+  if (Number.isFinite(optionMultiplier) && optionMultiplier > 0) {
+    return optionMultiplier;
+  }
+
+  const metadataMultiplier = Number(asset.metadata?.contractMultiplier);
+  if (Number.isFinite(metadataMultiplier) && metadataMultiplier > 0) {
+    return metadataMultiplier;
+  }
+  if (asset.instrumentType === InstrumentType.OPTION) return 100;
+  if (asset.instrumentType === InstrumentType.BOND) return 0.01;
+  return 1;
+};
+
+export interface ResolvedActivityCash {
+  amount: number | null;
+  expectedAmount: number | null;
+  grossAmount: number | null;
+  signedCashEffect: number;
+}
+
+/** Mirrors the Rust ActivityEconomicsResolver for display and cash-audit paths. */
+export const resolveActivityCash = (activity: ActivityDetails): ResolvedActivityCash => {
+  const { activityType, assetSymbol, assetId } = activity;
+  if (
+    activityType === ActivityType.SPLIT ||
+    isSecuritiesTransfer(activityType, assetSymbol, assetId)
+  ) {
+    return { amount: null, expectedAmount: null, grossAmount: null, signedCashEffect: 0 };
+  }
+
+  const fee = Math.abs(getFee(activity));
+  const tax = Math.abs(getTax(activity));
+  const charges = fee + tax;
+  const quantity = Math.abs(getQuantity(activity));
+  const unitPrice = Math.abs(getUnitPrice(activity));
+  const derivedGross =
+    quantity > 0 && unitPrice > 0
+      ? quantity * unitPrice * getContractMultiplier(activity)
+      : null;
+
+  let expectedAmount: number | null = null;
+  switch (activityType) {
+    case ActivityType.BUY:
+      expectedAmount = derivedGross == null ? null : derivedGross + charges;
+      break;
+    case ActivityType.SELL:
+    case ActivityType.DEPOSIT:
+    case ActivityType.DIVIDEND:
+    case ActivityType.INTEREST:
+    case ActivityType.CREDIT:
+    case ActivityType.TRANSFER_IN:
+      expectedAmount = derivedGross == null ? null : derivedGross - charges;
+      break;
+    case ActivityType.WITHDRAWAL:
+    case ActivityType.TRANSFER_OUT:
+      expectedAmount = derivedGross == null ? null : derivedGross + charges;
+      break;
+    case ActivityType.FEE:
+      expectedAmount = fee > 0 ? fee : null;
+      break;
+    case ActivityType.TAX:
+      expectedAmount = tax > 0 ? tax : fee > 0 ? fee : null;
+      break;
+  }
+  if (expectedAmount != null && expectedAmount <= 0) expectedAmount = null;
+
+  const rawStoredAmount = activity.amount == null ? null : Number(activity.amount);
+  const suppliedAmount =
+    rawStoredAmount != null && Number.isFinite(rawStoredAmount) ? Math.abs(rawStoredAmount) : null;
+  const amount = suppliedAmount ?? expectedAmount;
+
+  let grossAmount: number | null = null;
+  if (amount != null) {
+    switch (activityType) {
+      case ActivityType.BUY:
+      case ActivityType.WITHDRAWAL:
+      case ActivityType.TRANSFER_OUT:
+        grossAmount = amount - charges;
+        break;
+      case ActivityType.SELL:
+      case ActivityType.DEPOSIT:
+      case ActivityType.DIVIDEND:
+      case ActivityType.INTEREST:
+      case ActivityType.CREDIT:
+      case ActivityType.TRANSFER_IN:
+        grossAmount = amount + charges;
+        break;
+      case ActivityType.FEE:
+      case ActivityType.TAX:
+        grossAmount = amount;
+        break;
+    }
+  }
+  if (grossAmount != null && grossAmount <= 0) grossAmount = null;
+
+  const inflow: readonly string[] = [
+    ActivityType.SELL,
+    ActivityType.DEPOSIT,
+    ActivityType.DIVIDEND,
+    ActivityType.INTEREST,
+    ActivityType.CREDIT,
+    ActivityType.TRANSFER_IN,
+  ];
+  const outflow: readonly string[] = [
+    ActivityType.BUY,
+    ActivityType.WITHDRAWAL,
+    ActivityType.FEE,
+    ActivityType.TAX,
+    ActivityType.TRANSFER_OUT,
+  ];
+  const isInflow = inflow.includes(activityType);
+  const isOutflow = outflow.includes(activityType);
+  const signedCashEffect = amount == null ? 0 : isInflow ? amount : isOutflow ? -amount : 0;
+
+  return {
+    amount: amount == null ? null : roundCurrency(amount),
+    expectedAmount: expectedAmount == null ? null : roundCurrency(expectedAmount),
+    grossAmount: grossAmount == null ? null : roundCurrency(grossAmount),
+    signedCashEffect: roundCurrency(signedCashEffect),
+  };
 };
 
 /**
@@ -366,58 +500,27 @@ export const getContractMultiplier = (activity: ActivityDetails): number => {
  * @returns The calculated value
  */
 export const calculateActivityValue = (activity: ActivityDetails): number => {
-  const { activityType, assetSymbol, assetId, subtype } = activity;
+  const { activityType, assetSymbol, assetId } = activity;
 
   // Handle special cases first
   if (activityType === ActivityType.SPLIT) {
     return 0; // Split activities don't have a monetary value
   }
 
-  // Standalone charges mirror the backend's charge_amt_for precedence:
-  // TAX prefers tax, then fee, then amount; FEE prefers fee, then amount.
-  if (activityType === ActivityType.FEE || activityType === ActivityType.TAX) {
-    if (activityType === ActivityType.TAX) {
-      const tax = getTax(activity);
-      if (tax !== 0) {
-        return roundCurrency(tax);
-      }
-    }
-    const fee = getFee(activity);
-    if (fee !== 0) {
-      return roundCurrency(fee);
-    }
-    return roundCurrency(getAmount(activity));
-  }
-
   const isSecTransfer = isSecuritiesTransfer(activityType, assetSymbol, assetId);
 
-  // Handle cash activities (but NOT securities transfers, which need qty × price)
+  // Cash-impacting activities use the same authoritative amount as the backend.
   if (
-    (isCashActivity(activityType) && !isSecTransfer) ||
-    isCashTransfer(activityType, assetSymbol, assetId) ||
-    isIncomeActivity(activityType)
+    !isSecTransfer &&
+    (isCashActivity(activityType) ||
+      isCashTransfer(activityType, assetSymbol, assetId) ||
+      isIncomeActivity(activityType) ||
+      activityType === ActivityType.BUY ||
+      activityType === ActivityType.SELL)
   ) {
-    let amount = getAmount(activity);
-    const fee = getFee(activity);
-    const tax = getTax(activity);
-
-    if (isAssetBackedIncomeSubtype(activityType, subtype) && amount === 0) {
-      const derivedAmount = getQuantity(activity) * getUnitPrice(activity);
-      if (Number.isFinite(derivedAmount) && derivedAmount > 0) {
-        amount = derivedAmount;
-      }
-    }
-
-    // For outgoing cash activities, add fee and tax to amount (total cash out)
-    if (activityType === ActivityType.WITHDRAWAL || activityType === ActivityType.TRANSFER_OUT) {
-      return roundCurrency(Number(amount) + Number(fee) + Number(tax));
-    }
-
-    // For incoming cash activities, subtract fee and withholding tax from amount
-    return roundCurrency(Number(amount) - Number(fee) - Number(tax));
+    return resolveActivityCash(activity).amount ?? 0;
   }
 
-  // Handle trading activities (and securities transfers)
   const quantity = getQuantity(activity);
   const unitPrice = getUnitPrice(activity);
   const fee = getFee(activity);
@@ -450,32 +553,14 @@ export const calculateActivityValue = (activity: ActivityDetails): number => {
 
 export const calculateActivityCashImpact = (activity: ActivityDetails): number => {
   const { activityType, assetSymbol, assetId, subtype } = activity;
-  const activityValue = calculateActivityValue(activity);
-
-  if (!Number.isFinite(activityValue) || activityValue === 0) {
+  if (isAssetBackedIncomeSubtype(activityType, subtype)) return 0;
+  if (
+    (activityType === ActivityType.TRANSFER_IN || activityType === ActivityType.TRANSFER_OUT) &&
+    !isCashTransfer(activityType, assetSymbol, assetId)
+  ) {
     return 0;
   }
-
-  switch (activityType) {
-    case ActivityType.BUY:
-    case ActivityType.WITHDRAWAL:
-    case ActivityType.FEE:
-    case ActivityType.TAX:
-      return roundCurrency(-activityValue);
-    case ActivityType.SELL:
-    case ActivityType.DEPOSIT:
-    case ActivityType.CREDIT:
-      return roundCurrency(activityValue);
-    case ActivityType.TRANSFER_IN:
-      return isCashTransfer(activityType, assetSymbol, assetId) ? roundCurrency(activityValue) : 0;
-    case ActivityType.TRANSFER_OUT:
-      return isCashTransfer(activityType, assetSymbol, assetId) ? roundCurrency(-activityValue) : 0;
-    case ActivityType.DIVIDEND:
-    case ActivityType.INTEREST:
-      return isAssetBackedIncomeSubtype(activityType, subtype) ? 0 : roundCurrency(activityValue);
-    default:
-      return 0;
-  }
+  return resolveActivityCash(activity).signedCashEffect;
 };
 
 /**

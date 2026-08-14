@@ -17,16 +17,24 @@ export function MobileActivitySteps({
 }: MobileActivityStepsProps) {
   const { watch } = useFormContext<NewActivityFormValues>();
   const activityType = watch("activityType");
+  const activityId = watch("id");
 
   if (isEditing) {
-    return <MobileDetailsStep activityType={activityType} accounts={accounts} isEditing />;
+    return (
+      <MobileDetailsStep
+        key={`${activityId ?? "edit"}:${activityType}`}
+        activityType={activityType}
+        accounts={accounts}
+        isEditing
+      />
+    );
   }
 
   return (
     <div className="h-full">
       {currentStep === 1 && <MobileActivityTypeStep />}
       {currentStep === 2 && activityType && (
-        <MobileDetailsStep activityType={activityType} accounts={accounts} />
+        <MobileDetailsStep key={activityType} activityType={activityType} accounts={accounts} />
       )}
     </div>
   );

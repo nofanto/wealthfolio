@@ -10,7 +10,7 @@ import { importActivitySchema } from "@/lib/schemas";
 import { tryParseDate } from "@/lib/utils";
 import { logger } from "@/adapters";
 import { SUBTYPE_DISPLAY_NAMES } from "@/lib/constants";
-import { canonicalizeActivitySubtype } from "@/lib/activity-utils";
+import { canonicalizeActivitySubtype, isCashSymbol } from "@/lib/activity-utils";
 import { looksLikeOccSymbol, normalizeOptionSymbol } from "@/lib/occ-symbol";
 import { looksLikeIsin } from "@/lib/isin";
 import { findMappedActivityType } from "./activity-type-mapping";
@@ -169,7 +169,7 @@ export type ValidationResult = ImportValidationResult;
 export function calculateCashActivityAmount(
   quantity: number | undefined,
   unitPrice: number | undefined,
-): number {
+): number | undefined {
   // Type guard - convert undefined to 0 for safe calculations and ensure absolute values
   const safeQuantity = quantity !== undefined && !isNaN(quantity) ? Math.abs(quantity) : 0;
   const safeUnitPrice = unitPrice !== undefined && !isNaN(unitPrice) ? Math.abs(unitPrice) : 0;
@@ -184,8 +184,8 @@ export function calculateCashActivityAmount(
     return safeUnitPrice;
   }
 
-  // Fallback to quantity
-  return safeQuantity;
+  // Some cash exports place the monetary value in quantity.
+  return safeQuantity > 0 ? safeQuantity : undefined;
 }
 
 /** Convert decimal-like schema values (string | number | null | undefined) to number | undefined */
@@ -210,19 +210,37 @@ interface ActivityLogicConfig {
   calculateFee: FeeCalculator;
 }
 
+function suppliedAmount(activity: Partial<ActivityImport>): number | undefined {
+  const amount = toNum(activity.amount);
+  return amount === undefined ? undefined : Math.abs(amount);
+}
+
+function derivedCashAmount(
+  activity: Partial<ActivityImport>,
+  direction: "in" | "out",
+): number | undefined {
+  const explicit = suppliedAmount(activity);
+  if (explicit !== undefined) return explicit;
+
+  const gross = calculateCashActivityAmount(toNum(activity.quantity), toNum(activity.unitPrice));
+  if (gross === undefined) return undefined;
+  const charges = Math.abs(toNum(activity.fee) ?? 0) + Math.abs(toNum(activity.tax) ?? 0);
+  const derived = direction === "in" ? gross - charges : gross + charges;
+  return derived > 0 ? derived : undefined;
+}
+
+function isImportedCashTransfer(activity: Partial<ActivityImport>): boolean {
+  const symbol = activity.symbol?.trim();
+  return !symbol || symbol.toUpperCase() === "CASH" || isCashSymbol(symbol);
+}
+
 // Create the configuration map
 const activityLogicMap: Partial<Record<ActivityType, ActivityLogicConfig>> = {
   [ActivityType.BUY]: {
     calculateSymbol: (activity) => activity.symbol, // Keep original symbol
     calculateAmount: (activity) => {
-      // Calculate amount = quantity * price if both positive, using absolute values
-      const qty = toNum(activity.quantity);
-      const price = toNum(activity.unitPrice);
-      if (qty && Math.abs(qty) > 0 && price && Math.abs(price) > 0) {
-        return Math.abs(qty) * Math.abs(price);
-      }
       const amt = toNum(activity.amount);
-      return amt ? Math.abs(amt) : undefined; // Fallback to provided amount with absolute value
+      return amt !== undefined ? Math.abs(amt) : undefined;
     },
     calculateFee: (activity) => {
       const f = toNum(activity.fee);
@@ -230,16 +248,10 @@ const activityLogicMap: Partial<Record<ActivityType, ActivityLogicConfig>> = {
     },
   },
   [ActivityType.SELL]: {
-    // Similar logic to BUY
     calculateSymbol: (activity) => activity.symbol,
     calculateAmount: (activity) => {
-      const qty = toNum(activity.quantity);
-      const price = toNum(activity.unitPrice);
-      if (qty && Math.abs(qty) > 0 && price && Math.abs(price) > 0) {
-        return Math.abs(qty) * Math.abs(price);
-      }
       const amt = toNum(activity.amount);
-      return amt ? Math.abs(amt) : undefined;
+      return amt !== undefined ? Math.abs(amt) : undefined;
     },
     calculateFee: (activity) => {
       const f = toNum(activity.fee);
@@ -248,14 +260,7 @@ const activityLogicMap: Partial<Record<ActivityType, ActivityLogicConfig>> = {
   },
   [ActivityType.DEPOSIT]: {
     calculateSymbol: () => "",
-    calculateAmount: (activity) => {
-      const amt = toNum(activity.amount);
-      return amt
-        ? Math.abs(amt)
-        : Math.abs(
-            calculateCashActivityAmount(toNum(activity.quantity), toNum(activity.unitPrice)),
-          );
-    },
+    calculateAmount: (activity) => derivedCashAmount(activity, "in"),
     calculateFee: (activity) => {
       const f = toNum(activity.fee);
       return f ? Math.abs(f) : 0;
@@ -263,14 +268,7 @@ const activityLogicMap: Partial<Record<ActivityType, ActivityLogicConfig>> = {
   },
   [ActivityType.WITHDRAWAL]: {
     calculateSymbol: () => "",
-    calculateAmount: (activity) => {
-      const amt = toNum(activity.amount);
-      return amt
-        ? Math.abs(amt)
-        : Math.abs(
-            calculateCashActivityAmount(toNum(activity.quantity), toNum(activity.unitPrice)),
-          );
-    },
+    calculateAmount: (activity) => derivedCashAmount(activity, "out"),
     calculateFee: (activity) => {
       const f = toNum(activity.fee);
       return f ? Math.abs(f) : 0;
@@ -278,14 +276,7 @@ const activityLogicMap: Partial<Record<ActivityType, ActivityLogicConfig>> = {
   },
   [ActivityType.INTEREST]: {
     calculateSymbol: (a) => a.symbol || "",
-    calculateAmount: (activity) => {
-      const amt = toNum(activity.amount);
-      return amt
-        ? Math.abs(amt)
-        : Math.abs(
-            calculateCashActivityAmount(toNum(activity.quantity), toNum(activity.unitPrice)),
-          );
-    },
+    calculateAmount: (activity) => derivedCashAmount(activity, "in"),
     calculateFee: (activity) => {
       const f = toNum(activity.fee);
       return f ? Math.abs(f) : 0;
@@ -293,14 +284,7 @@ const activityLogicMap: Partial<Record<ActivityType, ActivityLogicConfig>> = {
   },
   [ActivityType.DIVIDEND]: {
     calculateSymbol: (activity) => activity.symbol, // Usually associated with a stock
-    calculateAmount: (activity) => {
-      const amt = toNum(activity.amount);
-      return amt
-        ? Math.abs(amt)
-        : Math.abs(
-            calculateCashActivityAmount(toNum(activity.quantity), toNum(activity.unitPrice)),
-          );
-    },
+    calculateAmount: (activity) => derivedCashAmount(activity, "in"),
     calculateFee: (activity) => {
       const f = toNum(activity.fee);
       return f ? Math.abs(f) : 0;
@@ -309,41 +293,26 @@ const activityLogicMap: Partial<Record<ActivityType, ActivityLogicConfig>> = {
   [ActivityType.FEE]: {
     calculateSymbol: () => "",
     calculateAmount: (activity) => {
-      // For FEE activities, amount should typically be 0 unless explicitly provided
-      const amt = toNum(activity.amount);
-      return amt ? Math.abs(amt) : 0;
+      const charge = Math.abs(toNum(activity.fee) ?? 0);
+      return suppliedAmount(activity) ?? (charge > 0 ? charge : undefined);
     },
-    calculateFee: (activity) => {
-      // For FEE activities, prefer fee field, then amount as fallback, then calculated amount
-      const f = toNum(activity.fee);
-      if (f && Math.abs(f) > 0) {
-        return Math.abs(f);
-      }
-      const amt = toNum(activity.amount);
-      if (amt && Math.abs(amt) > 0) {
-        return Math.abs(amt);
-      }
-      return Math.abs(
-        calculateCashActivityAmount(toNum(activity.quantity), toNum(activity.unitPrice)),
-      );
-    },
+    calculateFee: () => 0,
   },
   [ActivityType.TAX]: {
     calculateSymbol: () => "",
     calculateAmount: (activity) => {
-      const amt = toNum(activity.amount);
-      return amt ? Math.abs(amt) : 0;
+      const tax = Math.abs(toNum(activity.tax) ?? 0);
+      const fee = Math.abs(toNum(activity.fee) ?? 0);
+      const charge = tax > 0 ? tax : fee;
+      return suppliedAmount(activity) ?? (charge > 0 ? charge : undefined);
     },
-    calculateFee: (activity) => {
-      const f = toNum(activity.fee);
-      return f ? Math.abs(f) : 0;
-    },
+    calculateFee: () => 0,
   },
   [ActivityType.TRANSFER_IN]: {
     calculateSymbol: (a) => a.symbol || "",
     calculateAmount: (activity) => {
-      const amt = toNum(activity.amount);
-      return amt ? Math.abs(amt) : 0;
+      if (!isImportedCashTransfer(activity)) return suppliedAmount(activity);
+      return derivedCashAmount(activity, "in");
     },
     calculateFee: (activity) => {
       const f = toNum(activity.fee);
@@ -353,8 +322,8 @@ const activityLogicMap: Partial<Record<ActivityType, ActivityLogicConfig>> = {
   [ActivityType.TRANSFER_OUT]: {
     calculateSymbol: (a) => a.symbol || "",
     calculateAmount: (activity) => {
-      const amt = toNum(activity.amount);
-      return amt ? Math.abs(amt) : 0;
+      if (!isImportedCashTransfer(activity)) return suppliedAmount(activity);
+      return derivedCashAmount(activity, "out");
     },
     calculateFee: (activity) => {
       const f = toNum(activity.fee);
@@ -371,14 +340,7 @@ const activityLogicMap: Partial<Record<ActivityType, ActivityLogicConfig>> = {
   },
   [ActivityType.CREDIT]: {
     calculateSymbol: () => "",
-    calculateAmount: (activity) => {
-      const amt = toNum(activity.amount);
-      return amt
-        ? Math.abs(amt)
-        : Math.abs(
-            calculateCashActivityAmount(toNum(activity.quantity), toNum(activity.unitPrice)),
-          );
-    },
+    calculateAmount: (activity) => derivedCashAmount(activity, "in"),
     calculateFee: (activity) => {
       const f = toNum(activity.fee);
       return f ? Math.abs(f) : 0;
@@ -391,7 +353,7 @@ const defaultLogic: ActivityLogicConfig = {
   calculateSymbol: (activity) => activity.symbol,
   calculateAmount: (activity) => {
     const amt = toNum(activity.amount);
-    return amt ? Math.abs(amt) : undefined;
+    return amt !== undefined ? Math.abs(amt) : undefined;
   },
   calculateFee: (activity) => {
     const f = toNum(activity.fee);
@@ -494,21 +456,8 @@ function transformRowToActivity(
   activity.symbol = logic.calculateSymbol(currentActivityState, accountCurrency);
   activity.amount = logic.calculateAmount(currentActivityState);
   activity.fee = logic.calculateFee(currentActivityState);
-
-  // For BUY/SELL: if CSV amount significantly disagrees with qty*price,
-  // trust CSV amount and derive unitPrice (handles bond % of par, etc.)
-  if (
-    (activity.activityType === ActivityType.BUY || activity.activityType === ActivityType.SELL) &&
-    activity.amount !== undefined &&
-    activity.amount > 0
-  ) {
-    const csvAmount = toNum(currentActivityState.amount);
-    if (csvAmount && csvAmount > 0 && activity.amount / csvAmount > 1.02) {
-      activity.amount = csvAmount;
-      if (activity.quantity && activity.quantity > 0) {
-        activity.unitPrice = csvAmount / activity.quantity;
-      }
-    }
+  if (activity.activityType === ActivityType.TAX) {
+    activity.tax = 0;
   }
 
   // 4. Final Cleanup & Defaulting
@@ -518,17 +467,6 @@ function transformRowToActivity(
   if (activity.fee !== undefined && isNaN(activity.fee)) activity.fee = 0; // Ensure fee is 0 if NaN
   if (activity.tax !== undefined && isNaN(activity.tax)) activity.tax = 0;
   if (activity.amount !== undefined && isNaN(activity.amount)) activity.amount = undefined;
-
-  const standaloneTaxAmount = toNum(activity.tax);
-  if (
-    activity.activityType === ActivityType.TAX &&
-    !toNum(activity.amount) &&
-    !toNum(activity.fee) &&
-    standaloneTaxAmount
-  ) {
-    activity.amount = Math.abs(standaloneTaxAmount);
-    activity.tax = undefined;
-  }
 
   if (activity.activityType === ActivityType.SPLIT) {
     activity.quantity = undefined;

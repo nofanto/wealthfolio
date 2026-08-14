@@ -6,6 +6,8 @@ import type { ActivityDetails, AssetResolutionInput } from "@/lib/types";
 export interface LocalTransaction extends ActivityDetails {
   /** Indicates if the transaction is newly created and not yet persisted */
   isNew?: boolean;
+  /** UI-only source for trade and asset-backed-income totals; never persisted. */
+  amountMode?: "calculated" | "custom";
   /** Pending asset name from custom asset dialog (not yet persisted) */
   pendingAssetName?: string;
   /** Pending asset kind from custom asset dialog (e.g., "SECURITY", "CRYPTO", "OTHER") */
@@ -44,7 +46,12 @@ export function isLocalTransaction(activity: ActivityDetails): activity is Local
  */
 export function toLocalTransaction(activity: ActivityDetails): LocalTransaction {
   if (isLocalTransaction(activity)) {
-    return activity;
+    return {
+      ...activity,
+      amountMode:
+        activity.amountMode ??
+        (activity.isNew || activity.amount == null ? "calculated" : "custom"),
+    };
   }
   // Preserve both explicit boundary values; absence must remain distinguishable from false.
   const flowMeta = activity.metadata?.flow as Record<string, unknown> | undefined;
@@ -52,6 +59,7 @@ export function toLocalTransaction(activity: ActivityDetails): LocalTransaction 
   return {
     ...activity,
     isNew: false,
+    amountMode: activity.amount == null ? "calculated" : "custom",
     isExternal,
     // Capture original values for change detection during updates
     _originalAssetSymbol: activity.assetSymbol,
@@ -108,6 +116,7 @@ export interface TransactionUpdateParams {
   value: unknown;
   accountLookup: Map<string, { id: string; name: string; currency: string }>;
   assetCurrencyLookup: Map<string, string>;
+  assetMultiplierLookup?: Map<string, number>;
   fallbackCurrency: string;
   resolveTransactionCurrency: (
     transaction: LocalTransaction,

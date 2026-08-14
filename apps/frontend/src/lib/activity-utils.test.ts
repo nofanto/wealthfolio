@@ -172,7 +172,7 @@ describe("Activity Utilities", () => {
       date: new Date(),
       quantity: "10",
       unitPrice: "100",
-      amount: "0",
+      amount: null,
       fee: "10",
       currency: "USD",
       needsReview: false,
@@ -212,6 +212,35 @@ describe("Activity Utilities", () => {
       expect(calculateActivityValue(activity)).toBe(988);
     });
 
+    it("uses the trusted BUY cash amount when it differs from quantity × price", () => {
+      const activity = createActivity({
+        activityType: ActivityType.BUY,
+        subtype: ACTIVITY_SUBTYPES.DRIP,
+        quantity: "0.001",
+        unitPrice: "589.8108",
+        amount: "0.30",
+        fee: "0",
+        tax: "0",
+      });
+
+      expect(calculateActivityValue(activity)).toBe(0.3);
+      expect(calculateActivityCashImpact(activity)).toBe(-0.3);
+    });
+
+    it("normalizes a legacy signed BUY amount for display", () => {
+      const activity = createActivity({
+        activityType: ActivityType.BUY,
+        quantity: "0.001",
+        unitPrice: "589.8108",
+        amount: "-0.30",
+        fee: "0",
+        tax: "0",
+      });
+
+      expect(calculateActivityValue(activity)).toBe(0.3);
+      expect(calculateActivityCashImpact(activity)).toBe(-0.3);
+    });
+
     it("should apply the contract multiplier for option BUY activities", () => {
       const activity = createActivity({
         activityType: ActivityType.BUY,
@@ -246,8 +275,8 @@ describe("Activity Utilities", () => {
         fee: "10",
       });
 
-      // 1000 - 10 = 990
-      expect(calculateActivityValue(activity)).toBe(990);
+      // Stored amount is the final cash credit and already includes charges.
+      expect(calculateActivityValue(activity)).toBe(1000);
     });
 
     it("should calculate INTEREST activity value correctly", () => {
@@ -257,8 +286,7 @@ describe("Activity Utilities", () => {
         fee: "5",
       });
 
-      // 500 - 5 = 495
-      expect(calculateActivityValue(activity)).toBe(495);
+      expect(calculateActivityValue(activity)).toBe(500);
     });
 
     it("should calculate DIVIDEND activity value correctly", () => {
@@ -268,8 +296,7 @@ describe("Activity Utilities", () => {
         fee: "3",
       });
 
-      // 300 - 3 = 297
-      expect(calculateActivityValue(activity)).toBe(297);
+      expect(calculateActivityValue(activity)).toBe(300);
     });
 
     it("should derive staking reward value from quantity and FMV when amount is empty", () => {
@@ -278,7 +305,7 @@ describe("Activity Utilities", () => {
         subtype: ACTIVITY_SUBTYPES.STAKING_REWARD,
         quantity: "0.01",
         unitPrice: "200",
-        amount: "0",
+        amount: null,
         fee: "0",
         assetSymbol: "SOL",
         assetId: "SOL",
@@ -293,7 +320,7 @@ describe("Activity Utilities", () => {
         subtype: ACTIVITY_SUBTYPES.DIVIDEND_IN_KIND,
         quantity: "2",
         unitPrice: "50",
-        amount: "0",
+        amount: null,
         fee: "0",
         assetSymbol: "AAPL",
         assetId: "AAPL",
@@ -309,8 +336,7 @@ describe("Activity Utilities", () => {
         fee: "10",
       });
 
-      // 1000 + 10 = 1010
-      expect(calculateActivityValue(activity)).toBe(1010);
+      expect(calculateActivityValue(activity)).toBe(1000);
     });
 
     it("should include tax in WITHDRAWAL activity value", () => {
@@ -321,8 +347,7 @@ describe("Activity Utilities", () => {
         tax: "5",
       });
 
-      // 1000 + 10 + 5 = 1015
-      expect(calculateActivityValue(activity)).toBe(1015);
+      expect(calculateActivityValue(activity)).toBe(1000);
     });
 
     it("should deduct tax from CREDIT activity value", () => {
@@ -333,8 +358,7 @@ describe("Activity Utilities", () => {
         tax: "10",
       });
 
-      // 100 - 2 - 10 = 88
-      expect(calculateActivityValue(activity)).toBe(88);
+      expect(calculateActivityValue(activity)).toBe(100);
     });
 
     it("should calculate FEE activity value correctly", () => {
@@ -346,14 +370,14 @@ describe("Activity Utilities", () => {
       expect(calculateActivityValue(activity)).toBe(10);
     });
 
-    it("should prefer fee over amount for FEE activities", () => {
+    it("should prefer the supplied amount for FEE activities", () => {
       const activity = createActivity({
         activityType: ActivityType.FEE,
         fee: "10",
         amount: "25",
       });
 
-      expect(calculateActivityValue(activity)).toBe(10);
+      expect(calculateActivityValue(activity)).toBe(25);
     });
 
     it("should fall back to amount for FEE activities when fee is zero", () => {
@@ -371,14 +395,26 @@ describe("Activity Utilities", () => {
         activityType: ActivityType.TAX,
         tax: "15",
         fee: "0",
-        amount: "0",
+        amount: null,
       });
 
       expect(calculateActivityValue(activity)).toBe(15);
       expect(calculateActivityCashImpact(activity)).toBe(-15);
     });
 
-    it("should prefer tax over fee and amount for TAX activities", () => {
+    it("should use legacy fee for TAX activities when tax and amount are missing", () => {
+      const activity = createActivity({
+        activityType: ActivityType.TAX,
+        tax: "0",
+        fee: "10",
+        amount: null,
+      });
+
+      expect(calculateActivityValue(activity)).toBe(10);
+      expect(calculateActivityCashImpact(activity)).toBe(-10);
+    });
+
+    it("should prefer the supplied amount over legacy TAX columns", () => {
       const activity = createActivity({
         activityType: ActivityType.TAX,
         tax: "15",
@@ -386,10 +422,10 @@ describe("Activity Utilities", () => {
         amount: "25",
       });
 
-      expect(calculateActivityValue(activity)).toBe(15);
+      expect(calculateActivityValue(activity)).toBe(25);
     });
 
-    it("should fall back to fee, then amount for TAX activities", () => {
+    it("should use a supplied TAX amount even when legacy fee is populated", () => {
       const withFee = createActivity({
         activityType: ActivityType.TAX,
         tax: "0",
@@ -397,7 +433,7 @@ describe("Activity Utilities", () => {
         amount: "25",
       });
 
-      expect(calculateActivityValue(withFee)).toBe(10);
+      expect(calculateActivityValue(withFee)).toBe(25);
 
       const withAmount = createActivity({
         activityType: ActivityType.TAX,
@@ -426,7 +462,7 @@ describe("Activity Utilities", () => {
         fee: "10",
       });
 
-      expect(calculateActivityValue(transferIn)).toBe(990);
+      expect(calculateActivityValue(transferIn)).toBe(1000);
 
       const transferOut = createActivity({
         activityType: ActivityType.TRANSFER_OUT,
@@ -435,7 +471,7 @@ describe("Activity Utilities", () => {
         fee: "10",
       });
 
-      expect(calculateActivityValue(transferOut)).toBe(1010);
+      expect(calculateActivityValue(transferOut)).toBe(1000);
     });
 
     it("should include tax in cash transfer activity values", () => {
@@ -447,8 +483,7 @@ describe("Activity Utilities", () => {
         tax: "5",
       });
 
-      // 1000 - 10 - 5 = 985
-      expect(calculateActivityValue(transferIn)).toBe(985);
+      expect(calculateActivityValue(transferIn)).toBe(1000);
 
       const transferOut = createActivity({
         activityType: ActivityType.TRANSFER_OUT,
@@ -458,8 +493,7 @@ describe("Activity Utilities", () => {
         tax: "5",
       });
 
-      // 1000 + 10 + 5 = 1015
-      expect(calculateActivityValue(transferOut)).toBe(1015);
+      expect(calculateActivityValue(transferOut)).toBe(1000);
     });
 
     it("treats blank-asset transfers as cash and uses amount", () => {
@@ -578,7 +612,7 @@ describe("Activity Utilities", () => {
             tax: "3",
           }),
         ),
-      ).toBe(-108);
+      ).toBe(-100);
 
       expect(
         calculateActivityCashImpact(
@@ -589,7 +623,7 @@ describe("Activity Utilities", () => {
             tax: "10",
           }),
         ),
-      ).toBe(88);
+      ).toBe(100);
 
       expect(
         calculateActivityCashImpact(
@@ -600,7 +634,7 @@ describe("Activity Utilities", () => {
             tax: "15",
           }),
         ),
-      ).toBe(84);
+      ).toBe(100);
     });
 
     it("does not treat securities transfers or asset-backed income as cash impact", () => {

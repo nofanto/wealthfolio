@@ -1,12 +1,11 @@
 import { useSettings } from "@/hooks/use-settings";
 import { ACTIVITY_SUBTYPES, ActivityType } from "@/lib/constants";
-import { roundDecimal } from "@/lib/utils";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { Button } from "@wealthfolio/ui/components/ui/button";
 import { Icons } from "@wealthfolio/ui/components/ui/icons";
 import { Label } from "@wealthfolio/ui/components/ui/label";
 import { RadioGroup, RadioGroupItem } from "@wealthfolio/ui/components/ui/radio-group";
-import { useEffect, useMemo } from "react";
+import { useMemo } from "react";
 import { useTranslation } from "react-i18next";
 import { FormProvider, useForm, type Resolver } from "react-hook-form";
 import { z } from "zod";
@@ -21,6 +20,7 @@ import {
   NotesInput,
   QuantityInput,
   SymbolSearch,
+  TradeTotalInput,
   type AccountSelectOption,
 } from "./fields";
 
@@ -53,6 +53,14 @@ export const createInterestFormSchema = (t?: TFunction) =>
         .positive({
           message: msg(t, "activity:form.err_amount_gt_zero", "Amount must be greater than 0."),
         }),
+      fee: z.coerce
+        .number({
+          invalid_type_error: msg(t, "activity:form.err_fee_number", "Fee must be a number."),
+        })
+        .min(0, {
+          message: msg(t, "activity:form.err_fee_non_negative", "Fee must be non-negative."),
+        })
+        .default(0),
       tax: z.coerce
         .number({
           invalid_type_error: msg(
@@ -206,6 +214,7 @@ export function InterestForm({
       activityDate: new Date(),
       symbol: null,
       amount: undefined,
+      fee: 0,
       tax: 0,
       quantity: undefined,
       unitPrice: undefined,
@@ -218,34 +227,24 @@ export function InterestForm({
   });
 
   const { watch } = form;
-  const { getFieldState, getValues, setValue } = form;
+  const { setValue } = form;
   const accountId = watch("accountId");
   const currency = watch("currency");
   const subtype = watch("subtype");
   const quantity = watch("quantity");
   const unitPrice = watch("unitPrice");
+  const fee = watch("fee");
+  const tax = watch("tax");
   const isStakingReward = subtype === ACTIVITY_SUBTYPES.STAKING_REWARD;
   const interestMode = subtype ?? INCOME_MODE_CASH;
 
-  useEffect(() => {
-    if (!isStakingReward) return;
+  const calculatedIncomeAmount = useMemo(() => {
+    if (!isStakingReward) return 0;
     const q = Number(quantity);
     const p = Number(unitPrice);
-    const currentAmount = Number(getValues("amount"));
-    const quantityIsDirty = getFieldState("quantity").isDirty;
-    const unitPriceIsDirty = getFieldState("unitPrice").isDirty;
-    const shouldAutoSetAmount =
-      quantityIsDirty || unitPriceIsDirty || !(Number.isFinite(currentAmount) && currentAmount > 0);
-    if (q > 0 && p > 0 && shouldAutoSetAmount) {
-      const computedAmount = roundDecimal(q * p);
-      if (currentAmount !== computedAmount) {
-        setValue("amount", computedAmount, {
-          shouldDirty: quantityIsDirty || unitPriceIsDirty,
-          shouldValidate: false,
-        });
-      }
-    }
-  }, [getFieldState, getValues, isStakingReward, quantity, setValue, unitPrice]);
+    const amount = q * p - Number(fee || 0) - Number(tax || 0);
+    return q > 0 && p > 0 && amount > 0 ? amount : 0;
+  }, [fee, isStakingReward, quantity, tax, unitPrice]);
 
   const handleInterestModeChange = (value: string) => {
     setValue("subtype", value === INCOME_MODE_CASH ? null : value, {
@@ -342,17 +341,27 @@ export function InterestForm({
             </div>
           )}
 
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-            <AmountInput
-              name="amount"
-              data-testid={isStakingReward ? "interest-amount-input" : undefined}
-              label={
-                isStakingReward
-                  ? t("activity:form.label_interest_amount")
-                  : t("activity:form.label_amount")
-              }
-              currency={currency}
-            />
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+            {isStakingReward ? (
+              <TradeTotalInput
+                side="income"
+                calculatedAmount={calculatedIncomeAmount}
+                initialAmount={defaultValues?.amount}
+                currency={currency}
+                label={t("activity:form.label_interest_amount")}
+                helpText={t("activity:form.help_total_credit")}
+                data-testid="interest-amount-input"
+              />
+            ) : (
+              <AmountInput
+                name="amount"
+                label={t("activity:form.label_interest_amount")}
+                labelHelpText={t("activity:form.help_total_credit")}
+                currency={currency}
+                data-testid="interest-amount-input"
+              />
+            )}
+            <AmountInput name="fee" label={t("activity:form.label_fee")} currency={currency} />
             <AmountInput
               name="tax"
               label={t("activity:form.label_withholding_tax")}

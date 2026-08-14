@@ -141,6 +141,21 @@ vi.mock("../fields", async () => {
       );
     },
     StockTradeIntentSelector: () => <div data-testid="stock-trade-intent-selector" />,
+    TradeTotalInput: ({ side }: { side: "buy" | "sell" }) => {
+      const { register } = useFormContext();
+      const label = side === "buy" ? "Total Debit" : "Total Credit";
+      return (
+        <div>
+          <label htmlFor="amount">{label}</label>
+          <input
+            data-testid="input-amount"
+            id="amount"
+            type="number"
+            {...register("amount", { valueAsNumber: true })}
+          />
+        </div>
+      );
+    },
     createValidatedSubmit: vi.fn((form, handler) => form.handleSubmit(handler)),
   };
 });
@@ -221,7 +236,7 @@ describe("BuyForm", () => {
       expect(screen.getByTestId("input-quantity")).toBeInTheDocument();
       expect(screen.getByTestId("input-unitPrice")).toBeInTheDocument();
       expect(screen.getByTestId("input-fee")).toBeInTheDocument();
-      // Amount is now calculated and displayed as text, not as an input field
+      expect(screen.getByRole("spinbutton", { name: "Total Debit" })).toBeInTheDocument();
       expect(screen.getByTestId("textarea-comment")).toBeInTheDocument();
     });
 

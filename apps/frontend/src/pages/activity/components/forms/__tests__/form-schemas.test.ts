@@ -1164,6 +1164,7 @@ describe("Form Schemas Validation", () => {
         activityDate: new Date(),
         symbol: "AAPL",
         amount: 12,
+        fee: 0,
         tax: 1.8,
         quantity: 2,
         unitPrice: 6,
@@ -1182,6 +1183,7 @@ describe("Form Schemas Validation", () => {
         activityDate: new Date(),
         symbol: "AAPL",
         amount: 12,
+        fee: 0,
         tax: 1.8,
         quantity: 2,
         unitPrice: 6,
@@ -1205,6 +1207,7 @@ describe("Form Schemas Validation", () => {
         activityDate: new Date(),
         symbol: "ETH",
         amount: 12,
+        fee: 0,
         tax: 1.8,
         quantity: 2,
         unitPrice: 6,
@@ -1223,6 +1226,7 @@ describe("Form Schemas Validation", () => {
         activityDate: new Date(),
         symbol: "ETH",
         amount: 12,
+        fee: 0,
         tax: 1.8,
         quantity: 2,
         unitPrice: 6,
@@ -1304,7 +1308,7 @@ describe("Form Schemas Validation", () => {
       expect(defaults.amount).toBe(15);
     });
 
-    it("TAX getDefaults falls back to fee, then amount", () => {
+    it("TAX getDefaults trusts amount before legacy fee", () => {
       const withFee = ACTIVITY_FORM_CONFIG.TAX.getDefaults(
         {
           activityType: ActivityType.TAX,
@@ -1317,7 +1321,7 @@ describe("Form Schemas Validation", () => {
         },
         [],
       ) as any;
-      expect(withFee.amount).toBe(10);
+      expect(withFee.amount).toBe(25);
 
       const withAmount = ACTIVITY_FORM_CONFIG.TAX.getDefaults(
         {
@@ -1363,6 +1367,44 @@ describe("Form Schemas Validation", () => {
       } as any);
 
       expect(payload).not.toHaveProperty("existingAssetId");
+    });
+
+    it("preserves option metadata and removes a redundant activity multiplier override", () => {
+      const payload = ACTIVITY_FORM_CONFIG.BUY.toPayload({
+        accountId: "acc-123",
+        activityDate: new Date(),
+        assetId: "AAPL260116C00250000",
+        symbolInstrumentType: "OPTION",
+        quantity: 1,
+        unitPrice: 10,
+        fee: 0,
+        tax: 0,
+        currency: "USD",
+        contractMultiplier: 10,
+        assetContractMultiplier: 10,
+        activityMetadata: { broker: "keep", contract_multiplier: 25 },
+      } as any);
+
+      expect(payload.metadata).toEqual({ broker: "keep" });
+    });
+
+    it("stores only a non-canonical option multiplier override", () => {
+      const payload = ACTIVITY_FORM_CONFIG.SELL.toPayload({
+        accountId: "acc-123",
+        activityDate: new Date(),
+        assetId: "AAPL260116C00250000",
+        symbolInstrumentType: "OPTION",
+        quantity: 1,
+        unitPrice: 10,
+        fee: 0,
+        tax: 0,
+        currency: "USD",
+        contractMultiplier: 25,
+        assetContractMultiplier: 10,
+        activityMetadata: { broker: "keep" },
+      } as any);
+
+      expect(payload.metadata).toEqual({ broker: "keep", contract_multiplier: 25 });
     });
   });
 

@@ -26,6 +26,7 @@ import {
   QuantityInput,
   StockTradeIntentSelector,
   SymbolSearch,
+  TradeTotalInput,
   type AssetType,
   type AccountSelectOption,
 } from "./fields";
@@ -96,6 +97,28 @@ export const createSellFormSchema = (t?: TFunction) =>
           message: msg(t, "activity:form.err_tax_non_negative", "Tax must be non-negative."),
         })
         .default(0),
+      amount: z.preprocess(
+        (value) =>
+          value === "" || value == null || (typeof value === "number" && Number.isNaN(value))
+            ? undefined
+            : value,
+        z.coerce
+          .number({
+            invalid_type_error: msg(
+              t,
+              "activity:form.err_amount_number",
+              "Cash amount must be a number.",
+            ),
+          })
+          .positive({
+            message: msg(
+              t,
+              "activity:form.err_amount_gt_zero",
+              "Cash amount must be greater than 0.",
+            ),
+          })
+          .optional(),
+      ),
       comment: z.string().optional().nullable(),
       subtype: z.string().optional().nullable(),
       // Advanced options
@@ -127,6 +150,8 @@ export const createSellFormSchema = (t?: TFunction) =>
       expirationDate: z.string().optional(),
       optionType: z.enum(["CALL", "PUT"]).optional(),
       contractMultiplier: z.coerce.number().positive().default(100).optional(),
+      assetContractMultiplier: z.coerce.number().positive().default(100).optional(),
+      activityMetadata: z.record(z.string(), z.unknown()).optional(),
     })
     .superRefine((data, ctx) => {
       // Options build their symbol at submit time; stocks/bonds require it upfront
@@ -249,6 +274,7 @@ export function SellForm({
       unitPrice: undefined,
       fee: 0,
       tax: 0,
+      amount: undefined,
       comment: null,
       subtype: null,
       fxRate: undefined,
@@ -260,6 +286,8 @@ export function SellForm({
       expirationDate: undefined,
       optionType: "CALL",
       contractMultiplier: 100,
+      assetContractMultiplier: 100,
+      activityMetadata: undefined,
       ...defaultValues,
       currency: defaultValues?.currency?.trim() || initialCurrency,
     },
@@ -317,15 +345,13 @@ export function SellForm({
   const optTax = watch("tax");
   const optMultiplier = watch("contractMultiplier");
 
-  const optionTotal = useMemo(() => {
-    if (!isOption) return 0;
+  const calculatedCashAmount = useMemo(() => {
     const q = Number(optQuantity) || 0;
     const p = Number(optUnitPrice) || 0;
-    const f = Number(optFee) || 0;
-    const tx = Number(optTax) || 0;
-    const m = Number(optMultiplier) || 100;
-    return q * p * m - f - tx;
-  }, [isOption, optQuantity, optUnitPrice, optFee, optTax, optMultiplier]);
+    const multiplier = isOption ? Number(optMultiplier) || 100 : assetType === "bond" ? 0.01 : 1;
+    const total = q * p * multiplier - Number(optFee || 0) - Number(optTax || 0);
+    return q > 0 && p > 0 && total > 0 ? total : 0;
+  }, [assetType, isOption, optFee, optMultiplier, optQuantity, optTax, optUnitPrice]);
 
   const handleAssetTypeChange = (value: AssetType) => {
     if (value === "option") {
@@ -615,59 +641,12 @@ export function SellForm({
             <AmountInput name="tax" label={t("activity:form.label_tax")} currency={currency} />
           </div>
 
-          {/* Option Total Credit with formula breakdown */}
-          {isOption && optQuantity && optUnitPrice && (
-            <div className="bg-muted/50 border-border rounded-md border p-3">
-              <div className="flex items-center justify-between">
-                <div>
-                  <span className="text-muted-foreground text-xs font-medium uppercase">
-                    {t("activity:form.total_credit")}
-                  </span>
-                  <p className="text-muted-foreground mt-0.5 text-xs tabular-nums">
-                    {Number(optQuantity)} ×{" "}
-                    {currency
-                      ? new Intl.NumberFormat("en-US", { style: "currency", currency }).format(
-                          Number(optUnitPrice),
-                        )
-                      : Number(optUnitPrice)}{" "}
-                    × {Number(optMultiplier) || 100}
-                    {Number(optFee) > 0 && (
-                      <>
-                        {" "}
-                        −{" "}
-                        {currency
-                          ? new Intl.NumberFormat("en-US", {
-                              style: "currency",
-                              currency,
-                            }).format(Number(optFee))
-                          : Number(optFee)}
-                      </>
-                    )}
-                    {Number(optTax) > 0 && (
-                      <>
-                        {" "}
-                        −{" "}
-                        {currency
-                          ? new Intl.NumberFormat("en-US", {
-                              style: "currency",
-                              currency,
-                            }).format(Number(optTax))
-                          : Number(optTax)}
-                      </>
-                    )}
-                  </p>
-                </div>
-                <span className="text-lg font-semibold tabular-nums">
-                  {new Intl.NumberFormat("en-US", {
-                    style: currency ? "currency" : "decimal",
-                    currency: currency || undefined,
-                    minimumFractionDigits: 2,
-                    maximumFractionDigits: 2,
-                  }).format(optionTotal)}
-                </span>
-              </div>
-            </div>
-          )}
+          <TradeTotalInput
+            side="sell"
+            calculatedAmount={calculatedCashAmount}
+            initialAmount={defaultValues?.amount}
+            currency={currency}
+          />
 
           {/* Warning for selling more than holdings */}
           {isSellingMoreThanHoldings && (

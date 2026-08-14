@@ -11,6 +11,7 @@ import {
   OptionContractFields,
   PositionIntentSelector,
   StockTradeIntentSelector,
+  TradeTotalInput,
   type AssetType,
   type AccountSelectOption,
 } from "../forms/fields";
@@ -21,6 +22,7 @@ import {
   Button,
   DatePickerInput,
   FormControl,
+  FormDescription,
   FormField,
   FormItem,
   FormLabel,
@@ -37,7 +39,7 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from "@wealthfolio/ui";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useFormContext } from "react-hook-form";
 import { useTranslation } from "react-i18next";
 import { restrictionAllowsType } from "@/lib/activity-restrictions";
@@ -78,6 +80,7 @@ const FEE_FIELD_ACTIVITY_TYPES: readonly string[] = [
   ActivityType.WITHDRAWAL,
   ActivityType.TRANSFER_IN,
   ActivityType.TRANSFER_OUT,
+  ActivityType.DIVIDEND,
   ActivityType.INTEREST,
 ];
 
@@ -145,16 +148,25 @@ export function MobileDetailsStep({ accounts, activityType, isEditing }: MobileD
   const optFee = isBuyOrSell ? watch("fee") : undefined;
   const optTax = isBuyOrSell ? watch("tax") : undefined;
   const optMultiplier = isOption ? ((watch("contractMultiplier" as any) as number) ?? 100) : 1;
-
-  const optionTotal = useMemo(() => {
-    if (!isOption || !optQuantity || !optUnitPrice) return 0;
-    const q = Number(optQuantity) || 0;
-    const p = Number(optUnitPrice) || 0;
-    const f = Number(optFee) || 0;
-    const t = Number(optTax) || 0;
-    const m = Number(optMultiplier) || 100;
-    return activityType === ActivityType.BUY ? q * p * m + f + t : q * p * m - f - t;
-  }, [isOption, optQuantity, optUnitPrice, optFee, optTax, optMultiplier, activityType]);
+  const initialCashAmount = useRef(isEditing ? getValues("amount") : undefined);
+  const calculatedTradeAmount = useMemo(() => {
+    if (!isBuyOrSell || !optQuantity || !optUnitPrice) return 0;
+    const multiplier = isOption ? Number(optMultiplier) || 100 : isBond ? 0.01 : 1;
+    const gross = Number(optQuantity) * Number(optUnitPrice) * multiplier;
+    const charges = Number(optFee || 0) + Number(optTax || 0);
+    const total = activityType === ActivityType.BUY ? gross + charges : gross - charges;
+    return total > 0 ? total : 0;
+  }, [
+    activityType,
+    isBuyOrSell,
+    isBond,
+    isOption,
+    optFee,
+    optMultiplier,
+    optQuantity,
+    optTax,
+    optUnitPrice,
+  ]);
 
   // Transfer state
   const isTransfer = TRANSFER_ACTIVITY_TYPES.includes(activityType);
@@ -174,8 +186,16 @@ export function MobileDetailsStep({ accounts, activityType, isEditing }: MobileD
   const isStakingReward = isInterestActivity && subtype === ACTIVITY_SUBTYPES.STAKING_REWARD;
   const isAssetBackedIncome = isDividendAssetIncome || isStakingReward;
   const incomeMode = subtype ?? INCOME_MODE_CASH;
+  const incomeFee = isAssetBackedIncome ? watch("fee") : undefined;
+  const incomeTax = isAssetBackedIncome ? watch("tax") : undefined;
+  const calculatedIncomeAmount = useMemo(() => {
+    if (!isAssetBackedIncome) return 0;
+    const gross = Number(quantity) * Number(unitPrice);
+    const charges = Number(incomeFee || 0) + Number(incomeTax || 0);
+    const total = gross - charges;
+    return total > 0 ? roundDecimal(total) : 0;
+  }, [incomeFee, incomeTax, isAssetBackedIncome, quantity, unitPrice]);
 
-  const isCreditActivity = activityType === ActivityType.CREDIT;
   const isAdjustmentActivity = activityType === ActivityType.ADJUSTMENT;
   const isFeeActivity = activityType === ActivityType.FEE;
   const isTaxActivity = activityType === ActivityType.TAX;
@@ -198,6 +218,31 @@ export function MobileDetailsStep({ accounts, activityType, isEditing }: MobileD
     (isCashTransfer && !needsInternalCashTransferAmounts);
   const needsFee =
     FEE_FIELD_ACTIVITY_TYPES.includes(activityType) && !needsInternalCashTransferAmounts;
+
+  const amountLabel =
+    activityType === ActivityType.DIVIDEND
+      ? t("activity:field_dividend_amount")
+      : activityType === ActivityType.INTEREST
+        ? t("activity:field_interest_amount")
+        : isTaxActivity
+          ? t("activity:field_tax_amount")
+          : activityType === ActivityType.DEPOSIT ||
+              activityType === ActivityType.CREDIT ||
+              activityType === ActivityType.TRANSFER_IN
+            ? t("activity:form.total_credit")
+            : activityType === ActivityType.WITHDRAWAL ||
+                activityType === ActivityType.TRANSFER_OUT
+              ? t("activity:form.total_debit")
+              : t("activity:form.label_amount");
+  const amountHelpText =
+    activityType === ActivityType.DEPOSIT ||
+    activityType === ActivityType.CREDIT ||
+    activityType === ActivityType.TRANSFER_IN ||
+    isIncomeActivity
+      ? t("activity:form.help_total_credit")
+      : activityType === ActivityType.WITHDRAWAL || activityType === ActivityType.TRANSFER_OUT
+        ? t("activity:form.help_total_debit")
+        : null;
 
   const needsSplitRatio = activityType === ActivityType.SPLIT;
 
@@ -408,26 +453,6 @@ export function MobileDetailsStep({ accounts, activityType, isEditing }: MobileD
       });
     }
   };
-
-  useEffect(() => {
-    if (!isAssetBackedIncome) return;
-    const q = Number(quantity);
-    const p = Number(unitPrice);
-    const currentAmount = Number(getValues("amount"));
-    const quantityIsDirty = getFieldState("quantity").isDirty;
-    const unitPriceIsDirty = getFieldState("unitPrice").isDirty;
-    const shouldAutoSetAmount =
-      quantityIsDirty || unitPriceIsDirty || !(Number.isFinite(currentAmount) && currentAmount > 0);
-    if (q > 0 && p > 0 && shouldAutoSetAmount) {
-      const computedAmount = roundDecimal(q * p);
-      if (currentAmount !== computedAmount) {
-        setValue("amount" as any, computedAmount, {
-          shouldDirty: quantityIsDirty || unitPriceIsDirty,
-          shouldValidate: false,
-        });
-      }
-    }
-  }, [getFieldState, getValues, isAssetBackedIncome, quantity, setValue, unitPrice]);
 
   // Quantity label adapts to asset type
   const quantityLabel = isAssetBackedIncome
@@ -833,66 +858,22 @@ export function MobileDetailsStep({ accounts, activityType, isEditing }: MobileD
                 </>
               )}
 
-              {/* Option Total Premium/Credit */}
-              {isOption && optQuantity && optUnitPrice && (
-                <div className="bg-muted/50 border-border rounded-lg border p-3">
-                  <div className="flex items-center justify-between">
-                    <div className="min-w-0 flex-1">
-                      <span className="text-muted-foreground text-xs font-medium uppercase tracking-wide">
-                        {activityType === ActivityType.BUY
-                          ? t("activity:form.total_debit")
-                          : t("activity:form.total_credit")}
-                      </span>
-                      <p className="text-muted-foreground mt-0.5 truncate text-xs tabular-nums">
-                        {Number(optQuantity)} × {Number(optUnitPrice)} ×{" "}
-                        {Number(optMultiplier) || 100}
-                        {Number(optFee) > 0 && (
-                          <>
-                            {" "}
-                            {activityType === ActivityType.BUY ? "+" : "−"} {Number(optFee)}
-                          </>
-                        )}
-                        {Number(optTax) > 0 && (
-                          <>
-                            {" "}
-                            {activityType === ActivityType.BUY ? "+" : "−"} {Number(optTax)}
-                          </>
-                        )}
-                      </p>
-                    </div>
-                    <span className="text-lg font-semibold tabular-nums">
-                      {new Intl.NumberFormat("en-US", {
-                        style: currency ? "currency" : "decimal",
-                        currency: currency || undefined,
-                        minimumFractionDigits: 2,
-                        maximumFractionDigits: 2,
-                      }).format(optionTotal)}
-                    </span>
-                  </div>
-                </div>
-              )}
-
               {/* Amount */}
-              {needsAmount && (
+              {needsAmount && !isAssetBackedIncome && (
                 <FormField
                   control={control}
                   name="amount"
                   render={({ field }) => (
                     <FormItem>
                       <FormLabel className="text-base font-medium">
-                        {activityType === ActivityType.DIVIDEND
-                          ? t("activity:field_dividend_amount")
-                          : activityType === ActivityType.INTEREST
-                            ? t("activity:field_interest_amount")
-                            : isTaxActivity
-                              ? t("activity:field_tax_amount")
-                              : isCreditActivity
-                                ? t("activity:mobile_form.credit_amount")
-                                : t("activity:form.label_amount")}
+                        {amountLabel}
                       </FormLabel>
                       <FormControl>
                         <MoneyInput {...field} />
                       </FormControl>
+                      {amountHelpText && (
+                        <FormDescription className="text-xs">{amountHelpText}</FormDescription>
+                      )}
                       <FormMessage />
                     </FormItem>
                   )}
@@ -1032,10 +1013,34 @@ export function MobileDetailsStep({ accounts, activityType, isEditing }: MobileD
                   {needsTax && taxField}
                 </>
               )}
+              {isBuyOrSell && (
+                <TradeTotalInput
+                  side={activityType === ActivityType.BUY ? "buy" : "sell"}
+                  calculatedAmount={calculatedTradeAmount}
+                  initialAmount={initialCashAmount.current}
+                  currency={currency}
+                  variant="mobile"
+                />
+              )}
+              {isAssetBackedIncome && (
+                <TradeTotalInput
+                  side="income"
+                  calculatedAmount={calculatedIncomeAmount}
+                  initialAmount={initialCashAmount.current}
+                  currency={currency}
+                  variant="mobile"
+                  label={
+                    isDividendActivity
+                      ? t("activity:form.label_dividend_amount")
+                      : t("activity:form.label_interest_amount")
+                  }
+                  helpText={t("activity:form.help_total_credit")}
+                />
+              )}
               {isFeeActivity && (
                 <FormField
                   control={control}
-                  name="fee"
+                  name="amount"
                   render={({ field }) => (
                     <FormItem>
                       <FormLabel className="text-base font-medium">

@@ -11,7 +11,7 @@ import {
   validateTransactionsForSave,
   valuesAreEqual,
 } from "./activity-utils";
-import type { LocalTransaction } from "./types";
+import { toLocalTransaction, type LocalTransaction } from "./types";
 
 // Helper to create mock account
 const createMockAccount = (overrides: Partial<Account> = {}): Account => ({
@@ -53,6 +53,18 @@ const createMockTransaction = (overrides: Partial<LocalTransaction> = {}): Local
 });
 
 describe("activity-utils", () => {
+  describe("toLocalTransaction", () => {
+    it("treats supplied totals as custom and missing totals as calculated", () => {
+      const supplied = toLocalTransaction(createMockTransaction({ amount: "0.3" }));
+      const missing = toLocalTransaction(
+        createMockTransaction({ id: "missing-total", amount: null }),
+      );
+
+      expect(supplied.amountMode).toBe("custom");
+      expect(missing.amountMode).toBe("calculated");
+    });
+  });
+
   describe("valuesAreEqual", () => {
     describe("numeric fields", () => {
       it("should compare numbers correctly", () => {
@@ -159,6 +171,7 @@ describe("activity-utils", () => {
 
       expect(draft.id).toMatch(/^temp-/);
       expect(draft.isNew).toBe(true);
+      expect(draft.amountMode).toBe("calculated");
       // needsReview should be false - it's reserved for sync service activities needing review
       expect(draft.needsReview).toBe(false);
     });
@@ -829,12 +842,19 @@ describe("activity-utils", () => {
   });
 
   describe("applyTransactionUpdate", () => {
-    it("should clear amount when value is null", () => {
+    it("should return a cleared trade total to calculated mode", () => {
       const accountLookup = new Map<string, { id: string; name: string; currency: string }>([
         ["account-1", { id: "account-1", name: "Test Account", currency: "USD" }],
       ]);
       const assetCurrencyLookup = new Map<string, string>();
-      const tx = createMockTransaction({ amount: "1000" });
+      const tx = createMockTransaction({
+        quantity: "0.001",
+        unitPrice: "589.8108",
+        amount: "0.3",
+        fee: "0",
+        tax: "0",
+        amountMode: "custom",
+      });
 
       const updated = applyTransactionUpdate({
         transaction: tx,
@@ -846,10 +866,206 @@ describe("activity-utils", () => {
         resolveTransactionCurrency: () => "USD",
       });
 
-      expect(updated.amount).toBeNull();
+      expect(updated.amountMode).toBe("calculated");
+      expect(updated.amount).toBe("0.5898108");
     });
 
-    it("should round asset-backed auto-computed amounts before storing them", () => {
+    it("recalculates a new BUY total from quantity, price, fees and taxes", () => {
+      const tx = createMockTransaction({
+        quantity: "2",
+        unitPrice: "100",
+        amount: null,
+        fee: "5",
+        tax: "2",
+        amountMode: "calculated",
+      });
+
+      const updated = applyTransactionUpdate({
+        transaction: tx,
+        field: "unitPrice",
+        value: "110",
+        accountLookup: new Map(),
+        assetCurrencyLookup: new Map(),
+        fallbackCurrency: "USD",
+        resolveTransactionCurrency: () => "USD",
+      });
+
+      expect(updated.amount).toBe("227");
+    });
+
+    it("recalculates SELL totals and applies the option multiplier", () => {
+      const tx = createMockTransaction({
+        activityType: ActivityType.SELL,
+        instrumentType: "OPTION",
+        quantity: "1",
+        unitPrice: "5",
+        amount: null,
+        fee: "2",
+        tax: "1",
+        amountMode: "calculated",
+      });
+
+      const updated = applyTransactionUpdate({
+        transaction: tx,
+        field: "quantity",
+        value: "2",
+        accountLookup: new Map(),
+        assetCurrencyLookup: new Map(),
+        fallbackCurrency: "USD",
+        resolveTransactionCurrency: () => "USD",
+      });
+
+      expect(updated.amount).toBe("997");
+    });
+
+    it("uses custom option and bond multipliers in calculated mode", () => {
+      const customOption = applyTransactionUpdate({
+        transaction: createMockTransaction({
+          instrumentType: "OPTION",
+          metadata: { contract_multiplier: 10 },
+          quantity: "2",
+          unitPrice: "5",
+          amount: null,
+          fee: "1",
+          amountMode: "calculated",
+        }),
+        field: "unitPrice",
+        value: "6",
+        accountLookup: new Map(),
+        assetCurrencyLookup: new Map(),
+        fallbackCurrency: "USD",
+        resolveTransactionCurrency: () => "USD",
+      });
+      const bond = applyTransactionUpdate({
+        transaction: createMockTransaction({
+          instrumentType: "BOND",
+          quantity: "1000",
+          unitPrice: "98",
+          amount: null,
+          fee: "2",
+          amountMode: "calculated",
+        }),
+        field: "unitPrice",
+        value: "99",
+        accountLookup: new Map(),
+        assetCurrencyLookup: new Map(),
+        fallbackCurrency: "USD",
+        resolveTransactionCurrency: () => "USD",
+      });
+
+      expect(customOption.amount).toBe("121");
+      expect(bond.amount).toBe("992");
+    });
+
+    it("uses the canonical asset multiplier supplied by the backend", () => {
+      const updated = applyTransactionUpdate({
+        transaction: createMockTransaction({
+          instrumentType: "OPTION",
+          contractMultiplier: "10",
+          quantity: "2",
+          unitPrice: "5",
+          amount: null,
+          fee: "1",
+          amountMode: "calculated",
+        }),
+        field: "unitPrice",
+        value: "6",
+        accountLookup: new Map(),
+        assetCurrencyLookup: new Map(),
+        fallbackCurrency: "USD",
+        resolveTransactionCurrency: () => "USD",
+      });
+
+      expect(updated.amount).toBe("121");
+    });
+
+    it("loads a canonical multiplier when an existing symbol is typed", () => {
+      const updated = applyTransactionUpdate({
+        transaction: createMockTransaction({
+          instrumentType: "OPTION",
+          contractMultiplier: undefined,
+          quantity: "2",
+          unitPrice: "5",
+          amount: null,
+          fee: "1",
+          amountMode: "calculated",
+        }),
+        field: "assetSymbol",
+        value: "mini",
+        accountLookup: new Map(),
+        assetCurrencyLookup: new Map(),
+        assetMultiplierLookup: new Map([["MINI", 10]]),
+        fallbackCurrency: "USD",
+        resolveTransactionCurrency: () => "USD",
+      });
+
+      expect(updated.contractMultiplier).toBe(10);
+      expect(updated.amount).toBe("101");
+    });
+
+    it("clears a calculated trade total when changing to a non-calculated type", () => {
+      const updated = applyTransactionUpdate({
+        transaction: createMockTransaction({
+          activityType: ActivityType.BUY,
+          amount: "1005",
+          amountMode: "calculated",
+        }),
+        field: "activityType",
+        value: ActivityType.DEPOSIT,
+        accountLookup: new Map(),
+        assetCurrencyLookup: new Map(),
+        fallbackCurrency: "USD",
+        resolveTransactionCurrency: () => "USD",
+      });
+
+      expect(updated.amount).toBeNull();
+      expect(updated.amountMode).toBe("calculated");
+    });
+
+    it("preserves a custom total when changing activity type", () => {
+      const updated = applyTransactionUpdate({
+        transaction: createMockTransaction({
+          activityType: ActivityType.BUY,
+          amount: "0.3",
+          amountMode: "custom",
+        }),
+        field: "activityType",
+        value: ActivityType.DEPOSIT,
+        accountLookup: new Map(),
+        assetCurrencyLookup: new Map(),
+        fallbackCurrency: "USD",
+        resolveTransactionCurrency: () => "USD",
+      });
+
+      expect(updated.amount).toBe("0.3");
+      expect(updated.amountMode).toBe("custom");
+    });
+
+    it("preserves a trusted BUY total when trade details change", () => {
+      const tx = createMockTransaction({
+        quantity: "0.001",
+        unitPrice: "589.8108",
+        amount: "0.3",
+        fee: "0",
+        tax: "0",
+        amountMode: "custom",
+      });
+
+      const updated = applyTransactionUpdate({
+        transaction: tx,
+        field: "unitPrice",
+        value: "600",
+        accountLookup: new Map(),
+        assetCurrencyLookup: new Map(),
+        fallbackCurrency: "USD",
+        resolveTransactionCurrency: () => "USD",
+      });
+
+      expect(updated.amount).toBe("0.3");
+      expect(updated.amountMode).toBe("custom");
+    });
+
+    it("preserves a trusted asset-backed income total when quantity changes", () => {
       const accountLookup = new Map<string, { id: string; name: string; currency: string }>([
         ["account-1", { id: "account-1", name: "Test Account", currency: "USD" }],
       ]);
@@ -860,6 +1076,7 @@ describe("activity-utils", () => {
         quantity: "1",
         unitPrice: "0.2",
         amount: "0.2",
+        amountMode: "custom",
       });
 
       const updated = applyTransactionUpdate({
@@ -872,7 +1089,32 @@ describe("activity-utils", () => {
         resolveTransactionCurrency: () => "USD",
       });
 
-      expect(updated.amount).toBe("0.02");
+      expect(updated.amount).toBe("0.2");
+      expect(updated.amountMode).toBe("custom");
+    });
+
+    it("recalculates asset-backed income only while its total is calculated", () => {
+      const updated = applyTransactionUpdate({
+        transaction: createMockTransaction({
+          activityType: ActivityType.DIVIDEND,
+          subtype: ACTIVITY_SUBTYPES.DRIP,
+          quantity: "0.001",
+          unitPrice: "589.8108",
+          amount: null,
+          fee: "0.01",
+          tax: "0.02",
+          amountMode: "calculated",
+        }),
+        field: "quantity",
+        value: "0.002",
+        accountLookup: new Map(),
+        assetCurrencyLookup: new Map(),
+        fallbackCurrency: "USD",
+        resolveTransactionCurrency: () => "USD",
+      });
+
+      expect(updated.amount).toBe("1.1496216");
+      expect(updated.amountMode).toBe("calculated");
     });
 
     it("should keep staking rewards asset-backed when subtype is selected", () => {
@@ -934,6 +1176,29 @@ describe("activity-utils", () => {
       expect(updated.quantity).toBeNull();
       expect(updated.unitPrice).toBeNull();
       expect(updated.amount).toBe("200");
+    });
+
+    it("clears a calculated asset-backed total when switching income back to cash", () => {
+      const updated = applyTransactionUpdate({
+        transaction: createMockTransaction({
+          activityType: ActivityType.DIVIDEND,
+          subtype: ACTIVITY_SUBTYPES.DRIP,
+          quantity: "2",
+          unitPrice: "100",
+          amount: "200",
+          amountMode: "calculated",
+        }),
+        field: "subtype",
+        value: "",
+        accountLookup: new Map(),
+        assetCurrencyLookup: new Map(),
+        fallbackCurrency: "USD",
+        resolveTransactionCurrency: () => "USD",
+      });
+
+      expect(updated.quantity).toBeNull();
+      expect(updated.unitPrice).toBeNull();
+      expect(updated.amount).toBeNull();
     });
 
     it("should clear invalid staking subtype fields when changing to dividend", () => {
@@ -1031,6 +1296,25 @@ describe("activity-utils", () => {
   });
 
   describe("validateTransactionsForSave", () => {
+    it("rejects signed quantity, price and amount magnitudes", () => {
+      const transaction = createMockTransaction({
+        id: "negative-magnitudes",
+        quantity: "-1",
+        unitPrice: "-10",
+        amount: "-10",
+      });
+
+      const result = validateTransactionsForSave([transaction], new Set(["negative-magnitudes"]));
+
+      expect(result.errors).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ field: "quantity" }),
+          expect.objectContaining({ field: "unitPrice" }),
+          expect.objectContaining({ field: "amount" }),
+        ]),
+      );
+    });
+
     it("should require asset-backed income fields for staking rewards", () => {
       const transactions: LocalTransaction[] = [
         createMockTransaction({

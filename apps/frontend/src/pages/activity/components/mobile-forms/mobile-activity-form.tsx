@@ -18,6 +18,7 @@ import {
   QuoteMode,
 } from "@/lib/constants";
 import {
+  getContractMultiplier,
   isAssetBackedIncomeSubtype,
   isSecuritiesTransfer,
   isSymbolRequired,
@@ -230,6 +231,16 @@ function validateTradeFields(
     }
   }
 
+  if (activityType === ActivityType.BUY && Number(data.amount) > 0) {
+    const charges = Number(data.fee || 0) + Number(data.tax || 0);
+    if (Number(data.amount) <= charges) {
+      return {
+        field: "amount",
+        message: t("activity:form.err_total_exceeds_charges"),
+      };
+    }
+  }
+
   return null;
 }
 
@@ -384,6 +395,7 @@ export function MobileActivityForm({
       quoteMode:
         activity?.assetQuoteMode === QuoteMode.MANUAL ? QuoteMode.MANUAL : QuoteMode.MARKET,
       exchangeMic: activity?.exchangeMic,
+      metadata: activity?.metadata,
       showCurrencySelect: false,
       ...(isTransferType && {
         transferMode: initialTransferMode,
@@ -404,7 +416,8 @@ export function MobileActivityForm({
         strikePrice: parsedOcc?.strikePrice,
         expirationDate: parsedOcc?.expiration,
         optionType: parsedOcc?.optionType,
-        contractMultiplier: 100,
+        contractMultiplier: getContractMultiplier(activity as ActivityDetails),
+        assetContractMultiplier: Number(activity?.contractMultiplier) || 100,
       }),
       // Bond defaults when editing a bond activity
       ...(isBondActivity && {
@@ -412,7 +425,7 @@ export function MobileActivityForm({
         assetKind: "BOND",
         symbolQuoteCcy: activity?.currency ?? undefined,
       }),
-    };
+    } as Partial<NewActivityFormValues>;
   }, [activity]);
 
   const form = useForm<NewActivityFormValues>({
@@ -470,6 +483,7 @@ export function MobileActivityForm({
         expirationDate: _expiration,
         optionType: _optType,
         contractMultiplier: _multiplier,
+        assetContractMultiplier: _assetMultiplier,
         id,
         ...submitData
       } = data as any;
@@ -504,12 +518,15 @@ export function MobileActivityForm({
           name: `${_underlying.toUpperCase()} ${_expiration} ${_optType} ${_strike}`,
           kind: "OPTION",
         };
-        if (_multiplier != null && _multiplier !== 100) {
-          submitData.metadata = {
-            ...submitData.metadata,
-            [METADATA_CONTRACT_MULTIPLIER]: _multiplier,
-          };
+        const metadata = { ...(submitData.metadata ?? {}) };
+        const canonicalMultiplier =
+          _assetMultiplier != null && _assetMultiplier > 0 ? _assetMultiplier : 100;
+        if (_multiplier != null && _multiplier > 0 && _multiplier !== canonicalMultiplier) {
+          metadata[METADATA_CONTRACT_MULTIPLIER] = _multiplier;
+        } else {
+          delete metadata[METADATA_CONTRACT_MULTIPLIER];
         }
+        submitData.metadata = metadata;
       }
 
       // For bonds: set instrument type
@@ -543,6 +560,19 @@ export function MobileActivityForm({
       );
       if (transferError) {
         form.setError(transferError.field as any, { message: transferError.message });
+        return;
+      }
+
+      const isCashOutflowWithGross =
+        submitData.activityType === ActivityType.BUY ||
+        submitData.activityType === ActivityType.WITHDRAWAL ||
+        (submitData.activityType === ActivityType.TRANSFER_OUT && !isSecuritiesTransfer);
+      const finalAmount = Number(submitData.amount);
+      const charges = Number(submitData.fee || 0) + Number(submitData.tax || 0);
+      if (isCashOutflowWithGross && finalAmount > 0 && finalAmount <= charges) {
+        form.setError("amount" as any, {
+          message: t("activity:form.err_total_exceeds_charges"),
+        });
         return;
       }
 
@@ -732,6 +762,15 @@ export function MobileActivityForm({
       }
       applyMobileIncomeUpdateClears(submitData, Boolean(id));
 
+      // Standalone charges use `amount` as their one canonical cash magnitude.
+      // Clear legacy charge columns so they cannot disagree with the edited total.
+      if (submitData.activityType === ActivityType.FEE) {
+        submitData.fee = 0;
+      } else if (submitData.activityType === ActivityType.TAX) {
+        submitData.tax = 0;
+        submitData.fee = 0;
+      }
+
       if ("quoteMode" in submitData && submitData.quoteMode === QuoteMode.MANUAL && account) {
         submitData.currency = submitData.currency ?? account.currency;
       }
@@ -821,11 +860,11 @@ export function MobileActivityForm({
         if (INCOME_ACTIVITY_TYPES.includes(activityType ?? "")) {
           const subtype = form.getValues("subtype");
           if (isAssetBackedIncomeSubtype(activityType ?? "", subtype)) {
-            return [...baseFields, "assetId", "quantity", "unitPrice", "amount", "tax"];
+            return [...baseFields, "assetId", "quantity", "unitPrice", "amount", "fee", "tax"];
           }
           return activityType === ActivityType.DIVIDEND
-            ? [...baseFields, "assetId", "amount", "tax"]
-            : [...baseFields, "amount", "tax"];
+            ? [...baseFields, "assetId", "amount", "fee", "tax"]
+            : [...baseFields, "amount", "fee", "tax"];
         }
         if (activityType === ActivityType.ADJUSTMENT) {
           return [...baseFields, "assetId"];

@@ -6,7 +6,7 @@ import {
   METADATA_CONTRACT_MULTIPLIER,
   QuoteMode,
 } from "@/lib/constants";
-import { isSecuritiesTransfer } from "@/lib/activity-utils";
+import { getContractMultiplier, isSecuritiesTransfer } from "@/lib/activity-utils";
 import { parseOccSymbol } from "@/lib/occ-symbol";
 import type { ActivityDetails } from "@/lib/types";
 import { BuyForm, type BuyFormValues } from "../components/forms/buy-form";
@@ -100,6 +100,24 @@ function selectedExistingAsset(
   return id ? { existingAssetId: id } : {};
 }
 
+function optionActivityMetadata(
+  original: Record<string, unknown> | undefined,
+  selectedMultiplier: number | undefined,
+  assetMultiplier: number | undefined,
+  isOption: boolean,
+): Record<string, unknown> | undefined {
+  if (!isOption) return original;
+
+  const metadata = { ...(original ?? {}) };
+  const canonical = assetMultiplier && assetMultiplier > 0 ? assetMultiplier : 100;
+  if (selectedMultiplier && selectedMultiplier > 0 && selectedMultiplier !== canonical) {
+    metadata[METADATA_CONTRACT_MULTIPLIER] = selectedMultiplier;
+  } else {
+    delete metadata[METADATA_CONTRACT_MULTIPLIER];
+  }
+  return original !== undefined || Object.keys(metadata).length > 0 ? metadata : undefined;
+}
+
 // Configuration for each activity type
 export const ACTIVITY_FORM_CONFIG: Record<
   PickerActivityType,
@@ -124,6 +142,7 @@ export const ACTIVITY_FORM_CONFIG: Record<
         currency: activity?.currency,
         fxRate: activity?.fxRate ?? undefined,
         exchangeMic: activity?.exchangeMic,
+        activityMetadata: activity?.metadata,
       };
 
       // Populate option-specific fields from OCC symbol when editing
@@ -139,7 +158,8 @@ export const ACTIVITY_FORM_CONFIG: Record<
           strikePrice: parsed?.strikePrice,
           expirationDate: parsed?.expiration,
           optionType: parsed?.optionType,
-          contractMultiplier: 100,
+          contractMultiplier: getContractMultiplier(activity),
+          assetContractMultiplier: Number(activity.contractMultiplier) || 100,
           subtype: activity?.subtype ?? ACTIVITY_SUBTYPES.POSITION_OPEN,
         };
       }
@@ -166,6 +186,7 @@ export const ACTIVITY_FORM_CONFIG: Record<
         ...selectedExistingAsset(d.assetId, d.existingAssetId, d.symbolInstrumentType),
         quantity: d.quantity,
         unitPrice: d.unitPrice,
+        amount: d.amount,
         fee: d.fee,
         tax: d.tax,
         subtype: d.subtype ?? undefined,
@@ -186,11 +207,12 @@ export const ACTIVITY_FORM_CONFIG: Record<
               providerSymbol: d.assetMetadata.providerSymbol ?? undefined,
             }
           : undefined,
-        ...(d.symbolInstrumentType === InstrumentType.OPTION &&
-          d.contractMultiplier != null &&
-          d.contractMultiplier !== 100 && {
-            metadata: { [METADATA_CONTRACT_MULTIPLIER]: d.contractMultiplier },
-          }),
+        metadata: optionActivityMetadata(
+          d.activityMetadata,
+          d.contractMultiplier,
+          d.assetContractMultiplier,
+          d.symbolInstrumentType === InstrumentType.OPTION,
+        ),
       };
     },
   },
@@ -214,6 +236,7 @@ export const ACTIVITY_FORM_CONFIG: Record<
         currency: activity?.currency,
         fxRate: activity?.fxRate ?? undefined,
         exchangeMic: activity?.exchangeMic,
+        activityMetadata: activity?.metadata,
       };
 
       // Populate option-specific fields from OCC symbol when editing
@@ -229,7 +252,8 @@ export const ACTIVITY_FORM_CONFIG: Record<
           strikePrice: parsed?.strikePrice,
           expirationDate: parsed?.expiration,
           optionType: parsed?.optionType,
-          contractMultiplier: 100,
+          contractMultiplier: getContractMultiplier(activity),
+          assetContractMultiplier: Number(activity.contractMultiplier) || 100,
           subtype: activity?.subtype ?? ACTIVITY_SUBTYPES.POSITION_CLOSE,
         };
       }
@@ -256,6 +280,7 @@ export const ACTIVITY_FORM_CONFIG: Record<
         ...selectedExistingAsset(d.assetId, d.existingAssetId, d.symbolInstrumentType),
         quantity: d.quantity,
         unitPrice: d.unitPrice,
+        amount: d.amount,
         fee: d.fee,
         tax: d.tax,
         subtype: d.subtype ?? undefined,
@@ -276,11 +301,12 @@ export const ACTIVITY_FORM_CONFIG: Record<
               providerSymbol: d.assetMetadata.providerSymbol ?? undefined,
             }
           : undefined,
-        ...(d.symbolInstrumentType === InstrumentType.OPTION &&
-          d.contractMultiplier != null &&
-          d.contractMultiplier !== 100 && {
-            metadata: { [METADATA_CONTRACT_MULTIPLIER]: d.contractMultiplier },
-          }),
+        metadata: optionActivityMetadata(
+          d.activityMetadata,
+          d.contractMultiplier,
+          d.assetContractMultiplier,
+          d.symbolInstrumentType === InstrumentType.OPTION,
+        ),
       };
     },
   },
@@ -338,6 +364,7 @@ export const ACTIVITY_FORM_CONFIG: Record<
       ...getBaseDefaults(activity, accounts),
       symbol: activity?.assetSymbol ?? activity?.assetId ?? "",
       amount: absNum(activity?.amount),
+      fee: absNum(activity?.fee) ?? 0,
       tax: absNum(activity?.tax) ?? 0,
       unitPrice: absNum(activity?.unitPrice),
       quantity: absNum(activity?.quantity),
@@ -357,6 +384,7 @@ export const ACTIVITY_FORM_CONFIG: Record<
         assetId: d.symbol,
         ...selectedExistingAsset(d.symbol, d.existingAssetId, d.symbolInstrumentType),
         amount: d.amount,
+        fee: d.fee,
         tax: d.tax,
         unitPrice: isAssetBackedDividend ? d.unitPrice : null,
         quantity: isAssetBackedDividend ? d.quantity : null,
@@ -507,10 +535,8 @@ export const ACTIVITY_FORM_CONFIG: Record<
     activityType: ActivityType.FEE,
     getDefaults: (activity, accounts) => ({
       ...getBaseDefaults(activity, accounts),
-      // The charge may be stored in `fee` (imported rows) or `amount`. Surface it
-      // with the backend's charge precedence (fee → amount) so editing shows the
-      // value that is actually displayed and booked.
-      amount: absNum(activity?.fee) || absNum(activity?.amount),
+      // The canonical amount wins; fee is only a legacy fallback.
+      amount: absNum(activity?.amount) || absNum(activity?.fee),
       // Advanced options
       currency: activity?.currency,
       subtype: activity?.subtype ?? null,
@@ -521,8 +547,7 @@ export const ACTIVITY_FORM_CONFIG: Record<
         accountId: d.accountId,
         activityDate: d.activityDate,
         amount: d.amount,
-        // Normalize the charge into `amount` and reset any legacy `fee` to zero so
-        // the backend's charge precedence (fee → amount) books the edited amount.
+        // Normalize the charge into `amount` and reset any legacy `fee`.
         fee: 0,
         comment: d.comment,
         subtype: d.subtype,
@@ -538,6 +563,7 @@ export const ACTIVITY_FORM_CONFIG: Record<
       ...getBaseDefaults(activity, accounts),
       symbol: activity?.assetSymbol ?? activity?.assetId ?? null,
       amount: absNum(activity?.amount),
+      fee: absNum(activity?.fee) ?? 0,
       tax: absNum(activity?.tax) ?? 0,
       unitPrice: absNum(activity?.unitPrice),
       quantity: absNum(activity?.quantity),
@@ -556,6 +582,7 @@ export const ACTIVITY_FORM_CONFIG: Record<
         assetId: d.symbol?.trim() || undefined,
         ...selectedExistingAsset(d.symbol, d.existingAssetId, d.symbolInstrumentType),
         amount: d.amount,
+        fee: d.fee,
         tax: d.tax,
         unitPrice: isStakingReward ? d.unitPrice : null,
         quantity: isStakingReward ? d.quantity : null,
@@ -575,10 +602,8 @@ export const ACTIVITY_FORM_CONFIG: Record<
     activityType: ActivityType.TAX,
     getDefaults: (activity, accounts) => ({
       ...getBaseDefaults(activity, accounts),
-      // The charge may be stored in `tax`/`fee` (imported rows) or `amount`. Surface
-      // it with the backend's charge precedence (tax → fee → amount) so editing shows
-      // the value that is actually displayed and booked.
-      amount: absNum(activity?.tax) || absNum(activity?.fee) || absNum(activity?.amount),
+      // The canonical amount wins; tax/fee are only legacy fallbacks.
+      amount: absNum(activity?.amount) || absNum(activity?.tax) || absNum(activity?.fee),
       // Advanced options
       currency: activity?.currency,
       subtype: activity?.subtype ?? null,
@@ -589,8 +614,7 @@ export const ACTIVITY_FORM_CONFIG: Record<
         accountId: d.accountId,
         activityDate: d.activityDate,
         amount: d.amount,
-        // Normalize the charge into `amount` and reset any legacy `tax`/`fee` to zero
-        // so the backend's charge precedence (tax → fee → amount) books the edited amount.
+        // Normalize the charge into `amount` and reset legacy charge columns.
         fee: 0,
         tax: 0,
         comment: d.comment,

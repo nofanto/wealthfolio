@@ -10,6 +10,7 @@ import { useTranslation } from "react-i18next";
 import { resolveSymbolQuote } from "@/adapters";
 import { CreateCustomAssetDialog } from "@/components/create-custom-asset-dialog";
 import { ActivityType } from "@/lib/constants";
+import { getAssetContractMultiplier, isAssetBackedIncomeSubtype } from "@/lib/activity-utils";
 import { isManualSearchResult, quoteModeFromSearchResult } from "@/lib/asset-utils";
 import { generateId } from "@/lib/id";
 import { LinkTransferModal } from "../link-transfer-modal";
@@ -20,6 +21,7 @@ import { useActivityMutations } from "../../hooks/use-activity-mutations";
 import { ActivityDataGridPagination } from "./activity-data-grid-pagination";
 import { ActivityDataGridToolbar } from "./activity-data-grid-toolbar";
 import {
+  applyCalculatedTradeTotal,
   applyTransactionUpdate,
   createCurrencyResolver,
   createDraftTransaction,
@@ -133,6 +135,18 @@ export function ActivityDataGrid({
     return entries;
   }, [assets]);
 
+  const assetMultiplierLookup = useMemo(() => {
+    const entries = new Map<string, number>();
+    assets.forEach((asset) => {
+      const multiplier = getAssetContractMultiplier(asset);
+      for (const key of [asset.id, asset.displayCode, asset.instrumentSymbol]) {
+        const normalized = key?.trim().toUpperCase();
+        if (normalized) entries.set(normalized, multiplier);
+      }
+    });
+    return entries;
+  }, [assets]);
+
   const resolveTransactionCurrency = useMemo(
     () => createCurrencyResolver(assetCurrencyLookup, fallbackCurrency),
     [assetCurrencyLookup, fallbackCurrency],
@@ -162,16 +176,22 @@ export function ActivityDataGrid({
     (activity: ActivityDetails) => {
       const now = new Date();
       const source = toLocalTransaction(activity);
-      const duplicated: LocalTransaction = {
+      const isTrade =
+        source.activityType === ActivityType.BUY || source.activityType === ActivityType.SELL;
+      const shouldCalculateAmount =
+        isTrade || isAssetBackedIncomeSubtype(source.activityType, source.subtype);
+      const duplicated = applyCalculatedTradeTotal({
         ...source,
         id: generateTempActivityId(),
         date: now,
         createdAt: now,
         updatedAt: now,
         isNew: true,
+        amount: shouldCalculateAmount ? null : source.amount,
+        amountMode: shouldCalculateAmount ? "calculated" : "custom",
         comment: t("activity:datagrid.duplicated_comment"),
         idempotencyKey: generateId("manual-duplicate"),
-      };
+      });
       setLocalTransactions((prev) => [duplicated, ...prev]);
       markDirtyBatch([duplicated.id]);
     },
@@ -269,13 +289,16 @@ export function ActivityDataGrid({
           const row = updated[rowIndex];
           dirtyId = row.id;
           const currency = provisionalCurrency ?? row.accountCurrency ?? fallbackCurrency;
-          updated[rowIndex] = {
+          updated[rowIndex] = applyCalculatedTradeTotal({
             ...row,
             assetSymbol: canonicalSymbol,
             exchangeMic: canonicalExchangeMic,
             assetQuoteMode: quoteModeFromSearchResult(result),
             currency,
             instrumentType: result.quoteType,
+            contractMultiplier: result.existingAssetId
+              ? assetMultiplierLookup.get(result.existingAssetId.trim().toUpperCase())
+              : undefined,
             pendingAssetId: result.existingAssetId,
             // Capture asset metadata for custom assets
             pendingAssetName: result.longName,
@@ -284,7 +307,7 @@ export function ActivityDataGrid({
             pendingInstrumentType: result.quoteType,
             pendingProviderId: result.providerId,
             pendingProviderSymbol: result.providerSymbol,
-          };
+          });
         }
         return updated;
       });
@@ -337,7 +360,7 @@ export function ActivityDataGrid({
 
             didUpdate = true;
             updatedRowId = row.id;
-            updated[rowIndex] = { ...row, ...changes };
+            updated[rowIndex] = applyCalculatedTradeTotal({ ...row, ...changes });
             return updated;
           });
 
@@ -347,7 +370,7 @@ export function ActivityDataGrid({
         });
       }
     },
-    [setLocalTransactions, fallbackCurrency, markDirtyBatch],
+    [assetMultiplierLookup, setLocalTransactions, fallbackCurrency, markDirtyBatch],
   );
 
   // Handle request to create a custom asset - opens the dialog
@@ -371,7 +394,7 @@ export function ActivityDataGrid({
           const row = updated[rowIndex];
           dirtyId = row.id;
           const currency = result.currency ?? row.accountCurrency ?? fallbackCurrency;
-          updated[rowIndex] = {
+          updated[rowIndex] = applyCalculatedTradeTotal({
             ...row,
             assetSymbol: canonicalSymbol,
             exchangeMic: canonicalExchangeMic,
@@ -385,7 +408,7 @@ export function ActivityDataGrid({
             pendingInstrumentType: result.quoteType,
             pendingProviderId: result.providerId,
             pendingProviderSymbol: result.providerSymbol,
-          };
+          });
         }
         return updated;
       });
@@ -439,6 +462,7 @@ export function ActivityDataGrid({
                 value: nextValue,
                 accountLookup,
                 assetCurrencyLookup,
+                assetMultiplierLookup,
                 fallbackCurrency,
                 resolveTransactionCurrency,
               });
@@ -461,6 +485,7 @@ export function ActivityDataGrid({
     [
       accountLookup,
       assetCurrencyLookup,
+      assetMultiplierLookup,
       fallbackCurrency,
       markDirtyBatch,
       resolveTransactionCurrency,

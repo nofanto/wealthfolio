@@ -127,7 +127,12 @@ export function WithdrawalForm({
         </FormSection>
 
         <FormSection title={t("activity:form.section_amount")}>
-          <AmountInput name="amount" label={t("activity:form.label_amount")} currency={currency} />
+          <AmountInput
+            name="amount"
+            label={t("activity:form.total_debit")}
+            labelHelpText={t("activity:form.help_total_debit")}
+            currency={currency}
+          />
         </FormSection>
 
         {/* Advanced options (currency, FX rate) and notes, collapsed by default */}

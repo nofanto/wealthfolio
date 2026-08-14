@@ -34,6 +34,9 @@ export const baseActivitySchema = z.object({
   symbolInstrumentType: z.string().nullable().optional(),
   // Existing asset id selected from symbol search, when available
   existingAssetId: z.string().nullable().optional(),
+  assetContractMultiplier: z.coerce.number().positive().optional(),
+  // Existing activity metadata is carried through edit forms unless explicitly changed.
+  metadata: z.record(z.string(), z.unknown()).optional(),
 });
 
 // Transfer schema: TRANSFER_IN/OUT supports both cash (amount) and securities (assetId + quantity + unitPrice)
@@ -44,7 +47,13 @@ export const transferActivitySchema = baseActivitySchema.extend({
   isExternal: z.boolean().default(false),
   direction: z.enum(["in", "out"]).default("out"),
   toAccountId: z.string().optional(),
-  amount: z.coerce.number().positive().optional().nullable(),
+  amount: z.preprocess(
+    (value) =>
+      value === "" || value == null || (typeof value === "number" && Number.isNaN(value))
+        ? undefined
+        : value,
+    z.coerce.number().positive().optional(),
+  ),
   sourceAmount: z.coerce.number().positive().optional().nullable(),
   destinationAmount: z.coerce.number().positive().optional().nullable(),
   sourceCurrency: z.string().optional(),
@@ -140,6 +149,7 @@ export const tradeActivitySchema = baseActivitySchema.extend({
     })
     .min(0, { message: "Tax must be a non-negative number." })
     .default(0),
+  amount: z.coerce.number().positive().optional().nullable(),
   quoteMode: z.enum([QuoteMode.MARKET, QuoteMode.MANUAL]).default(QuoteMode.MARKET),
   // Asset type selection (stock/option/bond)
   assetType: z.enum(["stock", "option", "bond"]).default("stock"),

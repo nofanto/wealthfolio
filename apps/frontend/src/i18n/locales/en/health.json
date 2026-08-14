@@ -132,6 +132,14 @@
       "title_one": "Incomplete transfer detected",
       "title_other": "{{count}} incomplete transfers detected",
       "message": "A transfer is unpaired or missing its matching leg, so its flow was treated as external and may distort returns. Pair it with the matching transfer, or mark it external if that is intended."
+    },
+    "activity_cash_mismatch": {
+      "title": "Cash amount differs from trade details",
+      "message": "Wealthfolio used the trusted cash amount. Review the imported total if the difference is unexpected."
+    },
+    "activity_cash_amount_missing": {
+      "title": "Cash amount is missing",
+      "message": "This posted activity has no cash amount and its total cannot be derived from the available fields."
     }
   },
   "page": {

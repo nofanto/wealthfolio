@@ -174,7 +174,7 @@ describe("validation-utils", () => {
 
       expect(activity.quantity).toBe(10);
       expect(activity.unitPrice).toBe(150.5);
-      expect(activity.amount).toBe(1505); // quantity * unitPrice (10 * 150.50 = 1505)
+      expect(activity.amount).toBe(1505); // supplied cash amount is preserved
       expect(activity.fee).toBe(5.0);
       expect(activity.tax).toBe(2.0);
     });
@@ -234,7 +234,7 @@ describe("validation-utils", () => {
 
       expect(activity.quantity).toBe(5);
       expect(activity.unitPrice).toBe(300.0);
-      expect(activity.amount).toBe(1500); // quantity * unitPrice
+      expect(activity.amount).toBe(1500); // supplied cash amount is preserved
       expect(activity.fee).toBe(2.5);
       expect(activity.tax).toBe(1.25);
     });
@@ -339,11 +339,11 @@ describe("validation-utils", () => {
 
       expect(activity.quantity).toBe(3);
       expect(activity.unitPrice).toBe(2500.0); // converted to positive
-      expect(activity.amount).toBe(7500); // quantity * unitPrice (3 * 2500)
+      expect(activity.amount).toBe(7500); // supplied cash amount is preserved
       expect(activity.fee).toBe(10.0); // converted to positive
     });
 
-    it("should correct unitPrice when CSV amount disagrees with qty*price (bond import)", () => {
+    it("should preserve amount and unitPrice independently for a bond import", () => {
       const testData = [
         {
           lineNumber: "1",
@@ -365,8 +365,8 @@ describe("validation-utils", () => {
 
       // Amount should be the CSV value, not qty*price
       expect(activity.amount).toBe(5822.95);
-      // unitPrice should be derived from amount/quantity (fraction of par)
-      expect(activity.unitPrice).toBeCloseTo(5822.95 / 6000, 10);
+      // The broker-reported price remains an independent fact.
+      expect(activity.unitPrice).toBe(97.04917);
       expect(activity.quantity).toBe(6000);
       expect(activity.fee).toBe(2.95);
     });
@@ -478,14 +478,14 @@ describe("validation-utils", () => {
       const sellActivity = result.activities[0];
       expect(sellActivity.quantity).toBe(25);
       expect(sellActivity.unitPrice).toBe(48.945);
-      expect(sellActivity.amount).toBe(1223.625); // quantity * unitPrice (25 * 48.945)
+      expect(sellActivity.amount).toBe(1223.63); // supplied cash amount is preserved
       expect(sellActivity.fee).toBe(0);
 
       // Second activity (BUY)
       const buyActivity = result.activities[1];
       expect(buyActivity.quantity).toBe(8);
       expect(buyActivity.unitPrice).toBe(86.5599);
-      expect(buyActivity.amount).toBe(692.4792); // quantity * unitPrice (8 * 86.5599)
+      expect(buyActivity.amount).toBe(692.48); // supplied cash amount is preserved
       expect(buyActivity.fee).toBe(0);
     });
 
@@ -535,8 +535,8 @@ describe("validation-utils", () => {
       const activity = result.activities[0];
 
       expect(activity.isValid).toBe(true);
-      expect(activity.amount).toBe(0); // Amount should be 0 for fee-only activities
-      expect(activity.fee).toBe(25.0); // The actual fee value
+      expect(activity.amount).toBe(25.0); // Legacy fee is normalized into the cash amount
+      expect(activity.fee).toBe(0);
       expect(activity.errors).toBeUndefined();
     });
 
@@ -562,7 +562,7 @@ describe("validation-utils", () => {
 
       expect(activity.isValid).toBe(true);
       expect(activity.amount).toBe(50.0); // Should use provided amount
-      expect(activity.fee).toBe(5.0); // Should use provided fee
+      expect(activity.fee).toBe(0); // Supplied amount is authoritative
       expect(activity.errors).toBeUndefined();
     });
   });
