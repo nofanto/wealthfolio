@@ -2495,7 +2495,7 @@ mod tests {
         assert_eq!(position.average_cost, dec!(100.25));
         assert_eq!(position.total_cost_basis, dec!(1002.50));
         assert_eq!(position.lots[0].acquisition_price, dec!(99.76));
-        assert!(next_state.cash_balances.get(account_currency).is_none());
+        assert!(!next_state.cash_balances.contains_key(account_currency));
         assert_eq!(next_state.net_contribution, dec!(1002.50));
     }
 
@@ -2532,7 +2532,7 @@ mod tests {
         assert_eq!(position.average_cost, dec!(998.09));
         assert_eq!(position.total_cost_basis, dec!(9980.90));
         assert_eq!(position.lots[0].acquisition_price, dec!(997.60));
-        assert!(next_state.cash_balances.get(account_currency).is_none());
+        assert!(!next_state.cash_balances.contains_key(account_currency));
         assert_eq!(next_state.net_contribution, dec!(9980.90));
     }
 
@@ -2782,7 +2782,7 @@ mod tests {
         assert_eq!(position_tsla.currency, asset_currency); // USD
 
         // A security transfer is non-cash; charges must be separate activities.
-        assert!(state_after_add.cash_balances.get(asset_currency).is_none());
+        assert!(!state_after_add.cash_balances.contains_key(asset_currency));
         assert_eq!(
             state_after_add.cash_balances.get(account_currency),
             Some(&dec!(1000)) // Unchanged 1000 CAD
@@ -2837,10 +2837,9 @@ mod tests {
         assert_eq!(position_tsla_after_remove.average_cost, dec!(200.5)); // Average cost remains
         assert_eq!(position_tsla_after_remove.total_cost_basis, dec!(1203)); // 6 * 200.5 USD
 
-        assert!(state_after_remove
+        assert!(!state_after_remove
             .cash_balances
-            .get(asset_currency)
-            .is_none());
+            .contains_key(asset_currency));
         assert_eq!(
             state_after_remove.cash_balances.get(account_currency),
             Some(&dec!(1000)) // Unchanged 1000 CAD
@@ -2933,10 +2932,9 @@ mod tests {
         assert_eq!(position_testusd.total_cost_basis, dec!(6010)); // (50 * 120) + 10 USD
 
         // Security transfers are non-cash.
-        assert!(state_after_asset_tx_in
+        assert!(!state_after_asset_tx_in
             .cash_balances
-            .get(asset_currency)
-            .is_none());
+            .contains_key(asset_currency));
         assert_eq!(
             state_after_asset_tx_in.cash_balances.get(account_currency),
             Some(&dec!(5000)) // Unchanged 5000 CAD
@@ -2991,10 +2989,9 @@ mod tests {
         assert_eq!(position_testusd_after_out.average_cost, dec!(120.2)); // Remains same
         assert_eq!(position_testusd_after_out.total_cost_basis, dec!(3606)); // 30 * 120.2 USD
 
-        assert!(state_after_asset_tx_out
+        assert!(!state_after_asset_tx_out
             .cash_balances
-            .get(asset_currency)
-            .is_none());
+            .contains_key(asset_currency));
         assert_eq!(
             state_after_asset_tx_out.cash_balances.get(account_currency),
             Some(&dec!(5000)) // Unchanged 5000 CAD
@@ -4358,7 +4355,7 @@ mod tests {
         let next_state = result.unwrap().snapshot;
 
         // One FX convention: account amount = activity amount × fx_rate.
-        assert!(next_state.cash_balances.get(activity_currency).is_none());
+        assert!(!next_state.cash_balances.contains_key(activity_currency));
         assert_eq!(
             next_state.cash_balances.get(account_currency),
             Some(&dec!(1700))
@@ -4592,7 +4589,7 @@ mod tests {
         assert!(result.is_ok(), "Calculation failed: {:?}", result.err());
         let next_state = result.unwrap().snapshot;
 
-        assert!(next_state.cash_balances.get(activity_currency).is_none());
+        assert!(!next_state.cash_balances.contains_key(activity_currency));
         assert_eq!(
             next_state.cash_balances.get(account_currency),
             Some(&dec!(4716))
@@ -4644,7 +4641,7 @@ mod tests {
         assert!(result.is_ok(), "Calculation failed: {:?}", result.err());
         let next_state = result.unwrap().snapshot;
 
-        assert!(next_state.cash_balances.get(activity_currency).is_none());
+        assert!(!next_state.cash_balances.contains_key(activity_currency));
         assert_eq!(
             next_state.cash_balances.get(account_currency),
             Some(&dec!(1066.50))
@@ -4702,7 +4699,7 @@ mod tests {
         let next_state = result.unwrap().snapshot;
 
         // Security transfers are non-cash; fees require separate charge activities.
-        assert!(next_state.cash_balances.get(activity_currency).is_none());
+        assert!(!next_state.cash_balances.contains_key(activity_currency));
         assert_eq!(
             next_state.cash_balances.get(account_currency),
             Some(&dec!(1000))
@@ -7648,7 +7645,7 @@ mod tests {
 
         // No position or cash movement is created for a non-cash transfer.
         assert!(!result.snapshot.positions.contains_key("AAPL"));
-        assert!(result.snapshot.cash_balances.get("USD").is_none());
+        assert!(!result.snapshot.cash_balances.contains_key("USD"));
     }
 
     #[test]
