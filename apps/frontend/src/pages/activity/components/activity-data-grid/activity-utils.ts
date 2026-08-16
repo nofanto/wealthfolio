@@ -9,17 +9,9 @@ import {
   resolveActivityCash,
 } from "@/lib/activity-utils";
 import { buildAssetResolutionInput, normalizeOptionalString } from "@/lib/asset-resolution-input";
-import {
-  ActivityType,
-  DECIMAL_PRECISION,
-  SUBTYPES_BY_ACTIVITY_TYPE,
-} from "@/lib/constants";
+import { ActivityType, DECIMAL_PRECISION, SUBTYPES_BY_ACTIVITY_TYPE } from "@/lib/constants";
 import type { Account } from "@/lib/types";
-import {
-  normalizeDecimalString,
-  parseLocalDateTime,
-  roundDecimal,
-} from "@/lib/utils";
+import { normalizeDecimalString, parseLocalDateTime, roundDecimal } from "@/lib/utils";
 import type {
   ActivityCreatePayload,
   ActivityUpdatePayload,
@@ -313,8 +305,7 @@ export function applyTransactionUpdate(params: TransactionUpdateParams): LocalTr
     updated = {
       ...updated,
       assetSymbol: upper,
-      contractMultiplier:
-        assetMultiplierLookup?.get(upper) ?? updated.contractMultiplier,
+      contractMultiplier: assetMultiplierLookup?.get(upper) ?? updated.contractMultiplier,
     };
 
     // Auto-fill currency only if not already set (e.g., by handleSymbolSelect
@@ -387,10 +378,7 @@ export function applyTransactionUpdate(params: TransactionUpdateParams): LocalTr
     ) {
       updated = { ...updated, assetSymbol: "", assetId: "" };
     }
-    if (
-      !isAssetBackedIncomeSubtype(updated.activityType, newSubtype) &&
-      wasAssetBacked
-    ) {
+    if (!isAssetBackedIncomeSubtype(updated.activityType, newSubtype) && wasAssetBacked) {
       updated = {
         ...updated,
         quantity: null,
@@ -847,11 +835,7 @@ function validateTransaction(transaction: LocalTransaction): TransactionValidati
     transaction.activityType === ActivityType.BUY ||
     transaction.activityType === ActivityType.WITHDRAWAL ||
     (transaction.activityType === ActivityType.TRANSFER_OUT &&
-      isCashTransfer(
-        transaction.activityType,
-        transaction.assetSymbol,
-        transaction.assetId,
-      ));
+      isCashTransfer(transaction.activityType, transaction.assetSymbol, transaction.assetId));
   if (isCashOutflowWithGross && amount > 0 && amount <= charges) {
     errors.push({
       transactionId: transaction.id,

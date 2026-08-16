@@ -408,9 +408,7 @@ export const resolveActivityCash = (activity: ActivityDetails): ResolvedActivity
   const quantity = Math.abs(getQuantity(activity));
   const unitPrice = Math.abs(getUnitPrice(activity));
   const derivedGross =
-    quantity > 0 && unitPrice > 0
-      ? quantity * unitPrice * getContractMultiplier(activity)
-      : null;
+    quantity > 0 && unitPrice > 0 ? quantity * unitPrice * getContractMultiplier(activity) : null;
 
   let expectedAmount: number | null = null;
   switch (activityType) {

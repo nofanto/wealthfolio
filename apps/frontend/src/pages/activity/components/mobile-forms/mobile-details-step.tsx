@@ -230,8 +230,7 @@ export function MobileDetailsStep({ accounts, activityType, isEditing }: MobileD
               activityType === ActivityType.CREDIT ||
               activityType === ActivityType.TRANSFER_IN
             ? t("activity:form.total_credit")
-            : activityType === ActivityType.WITHDRAWAL ||
-                activityType === ActivityType.TRANSFER_OUT
+            : activityType === ActivityType.WITHDRAWAL || activityType === ActivityType.TRANSFER_OUT
               ? t("activity:form.total_debit")
               : t("activity:form.label_amount");
   const amountHelpText =
@@ -865,9 +864,7 @@ export function MobileDetailsStep({ accounts, activityType, isEditing }: MobileD
                   name="amount"
                   render={({ field }) => (
                     <FormItem>
-                      <FormLabel className="text-base font-medium">
-                        {amountLabel}
-                      </FormLabel>
+                      <FormLabel className="text-base font-medium">{amountLabel}</FormLabel>
                       <FormControl>
                         <MoneyInput {...field} />
                       </FormControl>
