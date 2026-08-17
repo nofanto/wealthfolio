@@ -613,7 +613,7 @@ mod tests {
     }
 
     #[test]
-    fn preserves_only_explicit_provider_flow_metadata() {
+    fn preserves_source_amount_and_only_explicit_provider_flow_metadata() {
         for is_external in [Some(true), Some(false), None] {
             let activity = AccountUniversalActivity {
                 id: Some(format!("activity-{is_external:?}")),
@@ -628,13 +628,15 @@ mod tests {
             };
 
             let mapped = map_test_activity(&activity);
+            let metadata: serde_json::Value =
+                serde_json::from_str(mapped.metadata.as_deref().unwrap()).unwrap();
+            assert_eq!(metadata["source_amount"], 100.0);
+
             match is_external {
                 Some(expected) => {
-                    let metadata: serde_json::Value =
-                        serde_json::from_str(mapped.metadata.as_deref().unwrap()).unwrap();
                     assert_eq!(metadata["flow"]["is_external"], expected);
                 }
-                None => assert_eq!(mapped.metadata, None),
+                None => assert!(metadata.get("flow").is_none()),
             }
         }
     }
