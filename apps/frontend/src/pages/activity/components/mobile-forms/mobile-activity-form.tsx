@@ -14,6 +14,7 @@ import {
 import {
   ACTIVITY_SUBTYPES,
   ActivityType,
+  DECIMAL_PRECISION,
   METADATA_CONTRACT_MULTIPLIER,
   QuoteMode,
 } from "@/lib/constants";
@@ -26,6 +27,7 @@ import {
 import { buildOccSymbol, parseOccSymbol } from "@/lib/occ-symbol";
 import { generateId } from "@/lib/id";
 import type { ActivityCreate, ActivityDetails, ActivityUpdate } from "@/lib/types";
+import { roundDecimal } from "@/lib/utils";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useEffect, useMemo, useState } from "react";
 import { useForm, type Resolver, type SubmitHandler } from "react-hook-form";
@@ -396,6 +398,9 @@ export function MobileActivityForm({
         activity?.assetQuoteMode === QuoteMode.MANUAL ? QuoteMode.MANUAL : QuoteMode.MARKET,
       exchangeMic: activity?.exchangeMic,
       metadata: activity?.metadata,
+      assetContractMultiplier: activity
+        ? getContractMultiplier(activity as ActivityDetails)
+        : undefined,
       showCurrencySelect: false,
       ...(isTransferType && {
         transferMode: initialTransferMode,
@@ -494,6 +499,22 @@ export function MobileActivityForm({
         submitData.activityType,
         submitData.subtype,
       );
+
+      if (TRADE_ACTIVITY_TYPES.includes(submitData.activityType) && submitData.amount == null) {
+        const quantity = Number(submitData.quantity);
+        const unitPrice = Number(submitData.unitPrice);
+        const multiplier =
+          _assetType === "option"
+            ? Number(_multiplier) || 100
+            : Number(_assetMultiplier) || (_assetType === "bond" ? 0.01 : 1);
+        const gross = quantity * unitPrice * multiplier;
+        const charges = Number(submitData.fee || 0) + Number(submitData.tax || 0);
+        const total =
+          submitData.activityType === ActivityType.BUY ? gross + charges : gross - charges;
+        if (quantity > 0 && unitPrice > 0 && total > 0) {
+          submitData.amount = roundDecimal(total, DECIMAL_PRECISION);
+        }
+      }
 
       // Validate trade fields (assetId for stocks, option fields for options)
       const tradeError = validateTradeFields(data as any, t);

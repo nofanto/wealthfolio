@@ -385,6 +385,26 @@ export const getAssetContractMultiplier = (
   return 1;
 };
 
+/** Find an asset by any form identifier and return its canonical multiplier. */
+export const findAssetContractMultiplier = (
+  assets: Asset[],
+  identifiers: (string | null | undefined)[],
+): number | undefined => {
+  const normalizedIdentifiers = identifiers
+    .map((value) => value?.trim().toUpperCase())
+    .filter((value): value is string => Boolean(value));
+
+  for (const identifier of normalizedIdentifiers) {
+    const asset = assets.find((candidate) =>
+      [candidate.id, candidate.displayCode, candidate.instrumentSymbol].some(
+        (value) => value?.trim().toUpperCase() === identifier,
+      ),
+    );
+    if (asset) return getAssetContractMultiplier(asset);
+  }
+  return undefined;
+};
+
 export interface ResolvedActivityCash {
   amount: number | null;
   expectedAmount: number | null;

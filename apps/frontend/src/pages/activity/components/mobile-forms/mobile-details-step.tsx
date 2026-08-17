@@ -43,7 +43,9 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useFormContext } from "react-hook-form";
 import { useTranslation } from "react-i18next";
 import { restrictionAllowsType } from "@/lib/activity-restrictions";
+import { findAssetContractMultiplier } from "@/lib/activity-utils";
 import { roundDecimal } from "@/lib/utils";
+import { useAssets } from "@/pages/asset/hooks/use-assets";
 import type { NewActivityFormValues } from "../forms/schemas";
 
 interface MobileDetailsStepProps {
@@ -115,6 +117,7 @@ export function MobileDetailsStep({ accounts, activityType, isEditing }: MobileD
   const { t } = useTranslation();
   const { control, getFieldState, getValues, watch, setValue, register } =
     useFormContext<NewActivityFormValues>();
+  const { assets } = useAssets();
   const { settings } = useSettingsContext();
   const isManualAsset = watch("quoteMode") === QuoteMode.MANUAL;
   const accountId = watch("accountId");
@@ -148,10 +151,35 @@ export function MobileDetailsStep({ accounts, activityType, isEditing }: MobileD
   const optFee = isBuyOrSell ? watch("fee") : undefined;
   const optTax = isBuyOrSell ? watch("tax") : undefined;
   const optMultiplier = isOption ? ((watch("contractMultiplier" as any) as number) ?? 100) : 1;
+  const tradeAssetId = isBuyOrSell ? watch("assetId") : undefined;
+  const existingAssetId = isBuyOrSell
+    ? (watch("existingAssetId" as any) as string | undefined)
+    : undefined;
+  const storedAssetMultiplier = isBuyOrSell
+    ? (watch("assetContractMultiplier" as any) as number | undefined)
+    : undefined;
+  const previousTradeAssetIdRef = useRef(tradeAssetId);
+  useEffect(() => {
+    if (previousTradeAssetIdRef.current !== tradeAssetId) {
+      setValue("assetContractMultiplier" as any, isOption ? 100 : isBond ? 0.01 : 1);
+      previousTradeAssetIdRef.current = tradeAssetId;
+    }
+  }, [isBond, isOption, setValue, tradeAssetId]);
+  const assetMultiplier = useMemo(() => {
+    const matchedMultiplier = findAssetContractMultiplier(assets, [existingAssetId, tradeAssetId]);
+    if (matchedMultiplier) return matchedMultiplier;
+    const storedMultiplier = Number(storedAssetMultiplier);
+    if (Number.isFinite(storedMultiplier) && storedMultiplier > 0) return storedMultiplier;
+    return isBond ? 0.01 : 1;
+  }, [assets, existingAssetId, isBond, storedAssetMultiplier, tradeAssetId]);
+  useEffect(() => {
+    if (!isBuyOrSell || assetMultiplier === Number(storedAssetMultiplier)) return;
+    setValue("assetContractMultiplier" as any, assetMultiplier, { shouldDirty: false });
+  }, [assetMultiplier, isBuyOrSell, setValue, storedAssetMultiplier]);
   const initialCashAmount = useRef(isEditing ? getValues("amount") : undefined);
   const calculatedTradeAmount = useMemo(() => {
     if (!isBuyOrSell || !optQuantity || !optUnitPrice) return 0;
-    const multiplier = isOption ? Number(optMultiplier) || 100 : isBond ? 0.01 : 1;
+    const multiplier = isOption ? Number(optMultiplier) || 100 : assetMultiplier;
     const gross = Number(optQuantity) * Number(optUnitPrice) * multiplier;
     const charges = Number(optFee || 0) + Number(optTax || 0);
     const total = activityType === ActivityType.BUY ? gross + charges : gross - charges;
@@ -159,7 +187,7 @@ export function MobileDetailsStep({ accounts, activityType, isEditing }: MobileD
   }, [
     activityType,
     isBuyOrSell,
-    isBond,
+    assetMultiplier,
     isOption,
     optFee,
     optMultiplier,
@@ -323,12 +351,15 @@ export function MobileDetailsStep({ accounts, activityType, isEditing }: MobileD
     if (value === "option") {
       setValue("quoteMode" as any, QuoteMode.MARKET);
       setValue("assetKind" as any, "OPTION");
+      setValue("assetContractMultiplier" as any, 100);
     } else if (value === "bond") {
       setValue("quoteMode" as any, QuoteMode.MANUAL);
       setValue("assetKind" as any, "BOND");
+      setValue("assetContractMultiplier" as any, 0.01);
     } else {
       setValue("quoteMode" as any, QuoteMode.MARKET);
       setValue("assetKind" as any, undefined);
+      setValue("assetContractMultiplier" as any, 1);
     }
     // Reset the trade intent (Sell Short / Buy to Cover / option Open-Close) so
     // a stale subtype never carries across asset types.

@@ -143,6 +143,7 @@ export const ACTIVITY_FORM_CONFIG: Record<
         fxRate: activity?.fxRate ?? undefined,
         exchangeMic: activity?.exchangeMic,
         activityMetadata: activity?.metadata,
+        assetContractMultiplier: activity ? getContractMultiplier(activity) : undefined,
       };
 
       // Populate option-specific fields from OCC symbol when editing
@@ -237,6 +238,7 @@ export const ACTIVITY_FORM_CONFIG: Record<
         fxRate: activity?.fxRate ?? undefined,
         exchangeMic: activity?.exchangeMic,
         activityMetadata: activity?.metadata,
+        assetContractMultiplier: activity ? getContractMultiplier(activity) : undefined,
       };
 
       // Populate option-specific fields from OCC symbol when editing

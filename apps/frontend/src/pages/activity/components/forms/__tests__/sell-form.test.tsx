@@ -4,7 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { SellForm } from "../sell-form";
 import { ACTIVITY_SUBTYPES } from "@/lib/constants";
 import type { AccountSelectOption } from "../fields";
-import type { Holding } from "@/lib/types";
+import type { Asset, Holding } from "@/lib/types";
 
 interface UseHoldingsResult {
   holdings: Holding[];
@@ -18,6 +18,8 @@ const holdingsHook = vi.hoisted(() => ({
   })),
 }));
 
+const assetsHook = vi.hoisted(() => ({ assets: [] as Asset[] }));
+
 // Mock useSettings hook to avoid AuthProvider dependency
 vi.mock("@/hooks/use-settings", () => ({
   useSettings: () => ({
@@ -30,6 +32,10 @@ vi.mock("@/hooks/use-settings", () => ({
 // Mock the useHoldings hook
 vi.mock("@/hooks/use-holdings", () => ({
   useHoldings: holdingsHook.useHoldings,
+}));
+
+vi.mock("@/pages/asset/hooks/use-assets", () => ({
+  useAssets: () => ({ assets: assetsHook.assets, isLoading: false, isError: false }),
 }));
 
 // Mock the fields components
@@ -129,7 +135,13 @@ vi.mock("../fields", async () => {
       );
     },
     StockTradeIntentSelector: () => <div data-testid="stock-trade-intent-selector" />,
-    TradeTotalInput: ({ side }: { side: "buy" | "sell" }) => {
+    TradeTotalInput: ({
+      side,
+      calculatedAmount,
+    }: {
+      side: "buy" | "sell";
+      calculatedAmount: number;
+    }) => {
       const { register } = useFormContext();
       const label = side === "buy" ? "Total Debit" : "Total Credit";
       return (
@@ -141,6 +153,7 @@ vi.mock("../fields", async () => {
             type="number"
             {...register("amount", { valueAsNumber: true })}
           />
+          <output data-testid="calculated-total">{calculatedAmount}</output>
         </div>
       );
     },
@@ -252,6 +265,7 @@ describe("SellForm", () => {
       holdings: [],
       isLoading: false,
     });
+    assetsHook.assets = [];
   });
 
   describe("Render Tests", () => {
@@ -344,6 +358,49 @@ describe("SellForm", () => {
 
       const form = container.querySelector("form");
       expect(form).toBeInTheDocument();
+    });
+  });
+
+  describe("Amount Calculation", () => {
+    it("uses the selected asset's canonical multiplier", async () => {
+      const user = userEvent.setup();
+      assetsHook.assets = [
+        {
+          id: "FUT:ES",
+          kind: "INVESTMENT",
+          displayCode: "ES",
+          instrumentSymbol: "ES",
+          instrumentType: "FUTURE",
+          quoteMode: "MARKET",
+          quoteCcy: "USD",
+          metadata: { contractMultiplier: 50 },
+          createdAt: "2026-01-01T00:00:00Z",
+          updatedAt: "2026-01-01T00:00:00Z",
+        },
+      ];
+
+      render(
+        <SellForm
+          accounts={mockAccounts}
+          defaultValues={{
+            accountId: "acc-1",
+            assetId: "ES",
+            existingAssetId: "FUT:ES",
+            quantity: 2,
+            unitPrice: 10,
+            fee: 1,
+            tax: 2,
+            currency: "USD",
+          }}
+          onSubmit={mockOnSubmit}
+        />,
+      );
+
+      expect(screen.getByTestId("calculated-total")).toHaveTextContent("997");
+      await user.click(screen.getByRole("button", { name: /add sell/i }));
+      await waitFor(() =>
+        expect(mockOnSubmit).toHaveBeenCalledWith(expect.objectContaining({ amount: 997 })),
+      );
     });
   });
 
