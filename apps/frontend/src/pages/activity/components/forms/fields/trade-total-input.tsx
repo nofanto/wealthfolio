@@ -40,6 +40,7 @@ export function TradeTotalInput({
   const amount = watch("amount");
   const hasInitialAmount = Number(initialAmount) > 0;
   const [preserveInitialAmount, setPreserveInitialAmount] = useState(hasInitialAmount);
+  const [isClearingAmount, setIsClearingAmount] = useState(false);
 
   useEffect(() => {
     setPreserveInitialAmount(hasInitialAmount);
@@ -50,12 +51,14 @@ export function TradeTotalInput({
     return roundDecimal(calculatedAmount, DECIMAL_PRECISION);
   }, [calculatedAmount]);
 
-  const isCustom = preserveInitialAmount || getFieldState("amount", formState).isDirty;
+  const hasEnteredAmount = Number(amount) > 0;
+  const isCustom =
+    hasEnteredAmount && (preserveInitialAmount || getFieldState("amount", formState).isDirty);
 
   useEffect(() => {
-    if (isCustom) return;
+    if (isCustom || (isClearingAmount && !hasEnteredAmount)) return;
     resetField("amount", { defaultValue: normalizedCalculatedAmount });
-  }, [isCustom, normalizedCalculatedAmount, resetField]);
+  }, [hasEnteredAmount, isClearingAmount, isCustom, normalizedCalculatedAmount, resetField]);
 
   const useCalculatedTotal = () => {
     setPreserveInitialAmount(false);
@@ -83,6 +86,13 @@ export function TradeTotalInput({
         currency={currency}
         placeholder={normalizedCalculatedAmount?.toString() ?? "0.00"}
         data-testid={dataTestId}
+        onValueChange={(value) => {
+          if (value == null) {
+            setPreserveInitialAmount(false);
+            setIsClearingAmount(true);
+          }
+        }}
+        onBlur={() => setIsClearingAmount(false)}
       />
       <div className="text-muted-foreground flex min-h-5 flex-wrap items-center gap-x-2 text-xs">
         <span>

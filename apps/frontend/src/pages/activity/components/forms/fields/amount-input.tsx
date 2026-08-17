@@ -27,6 +27,8 @@ interface AmountInputProps<TFieldValues extends FieldValues = FieldValues> {
   maxDecimalPlaces?: number;
   /** Currency code to display as adornment (e.g., "USD") */
   currency?: string;
+  onValueChange?: (value: number | undefined) => void;
+  onBlur?: () => void;
 }
 
 function toInputTestId(name: string) {
@@ -44,6 +46,8 @@ export function AmountInput<TFieldValues extends FieldValues = FieldValues>({
   "data-testid": dataTestId,
   maxDecimalPlaces = DECIMAL_PRECISION,
   currency,
+  onValueChange,
+  onBlur,
 }: AmountInputProps<TFieldValues>) {
   const { t } = useTranslation(["activity"]);
   const resolvedLabel = label ?? t("activity:form.label_amount");
@@ -82,7 +86,14 @@ export function AmountInput<TFieldValues extends FieldValues = FieldValues>({
                   ref={field.ref}
                   name={field.name}
                   value={field.value}
-                  onValueChange={field.onChange}
+                  onValueChange={(value) => {
+                    field.onChange(value);
+                    onValueChange?.(value);
+                  }}
+                  onBlur={() => {
+                    field.onBlur();
+                    onBlur?.();
+                  }}
                   placeholder={placeholder}
                   maxDecimalPlaces={maxDecimalPlaces}
                   aria-label={resolvedLabel}
@@ -97,7 +108,14 @@ export function AmountInput<TFieldValues extends FieldValues = FieldValues>({
                 ref={field.ref}
                 name={field.name}
                 value={field.value}
-                onValueChange={field.onChange}
+                onValueChange={(value) => {
+                  field.onChange(value);
+                  onValueChange?.(value);
+                }}
+                onBlur={() => {
+                  field.onBlur();
+                  onBlur?.();
+                }}
                 placeholder={placeholder}
                 maxDecimalPlaces={maxDecimalPlaces}
                 aria-label={resolvedLabel}

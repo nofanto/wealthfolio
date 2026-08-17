@@ -53,6 +53,22 @@ describe("TradeTotalInput", () => {
     expect(screen.getByText("Calculated")).toBeInTheDocument();
   });
 
+  it("returns a cleared supplied total to calculated mode", async () => {
+    const user = userEvent.setup();
+    const { rerender } = render(<Harness calculatedAmount={100} initialAmount={90} />);
+    const input = screen.getByTestId("amount-input");
+
+    await user.clear(input);
+    expect(input).toHaveValue("");
+    await user.tab();
+
+    await waitFor(() => expect(input).toHaveValue("100"));
+    expect(screen.getByText("Calculated")).toBeInTheDocument();
+
+    rerender(<Harness calculatedAmount={120} initialAmount={90} />);
+    await waitFor(() => expect(input).toHaveValue("120"));
+  });
+
   it("stops recalculating after the user edits the total", async () => {
     const user = userEvent.setup();
     const { rerender } = render(<Harness calculatedAmount={100} />);
